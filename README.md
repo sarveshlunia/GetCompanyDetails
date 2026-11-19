@@ -12,19 +12,28 @@ Input: one name per line, or CSV/XLSX/TXT with columns `Company`, `Meetup Person
 Inline form: `Acme Ltd | Rahul Sharma | ACME.NS`. If the name lookup picks the wrong stock, put the
 Yahoo ticker (`XYZ.NS` / `XYZ.BO`) in the hint.
 
-## Where data comes from (all free)
-- **Listed companies** - Yahoo Finance (`yfinance`): about, address, website, market cap, 3 yrs revenue & PAT,
-  net worth, investments, cash, debt, key executives. Converted to Rs. crore, FY labelled Apr-Mar.
-- **Ratings, news, LinkedIn URL, plants, group companies** - DuckDuckGo search snippets (`ddgs`).
-  These are *leads*, flagged "verify". LinkedIn is never scraped; only the profile URL/headline from search.
+## How it follows your manual process (from the voice note)
+| Field | Source, in order |
+|---|---|
+| About, corporate address | Company website (Yahoo/Zauba only as fallback) |
+| Listed/Unlisted, Authorised + Paid-up capital ("market capital") | Zauba Corp |
+| Net worth, investments, revenue (3 yrs), PAT, debt | Screener **consolidated** (Yahoo fallback), Rs. crore |
+| Cash & equivalents | Yahoo balance sheet |
+| Long/short-term rating | Search snippets + Screener "Credit ratings" links -> else ChatGPT prompt |
+| Directors | Zauba -> else ChatGPT prompt (website directors not auto-parsed) |
+| Products & services, factories | Company website -> else ChatGPT prompt |
+| Meetup person: designation, LinkedIn link | Public search result (never scraped) |
+| LinkedIn work history (company, from-to) | **Manual** - needs login; ChatGPT prompt provided |
+
+Anything the free sources miss is listed under "Gaps" with a ready-to-paste ChatGPT prompt per company
+(your "chart GBD" step), so you only do the manual part for what's missing.
 
 ## Blunt limits
-- **Unlisted companies get almost nothing** structured. Yahoo has no data on them; the sheet marks gaps and gives
-  Tofler / Zauba / MCA lookup links. Free sources simply don't cover them well. That's the real constraint.
-- Directors = key executives from Yahoo, not the full board. Products, factories, group companies = search leads only.
-- LinkedIn career history needs a login - not retrievable here. You get the profile link + headline if search finds it.
-- Yahoo data for Indian small caps can be missing/lagging; DuckDuckGo may rate-limit big batches. Keep batches small.
-- Ratings regex-parsed from snippets can be wrong or stale - confirm on CRISIL/ICRA/CARE.
+- Zauba is bot-protected and Screener/company sites change HTML; scrapers are best-effort and written against
+  fixtures, not verified live. If one is blocked you get a gap + manual link, not a crash.
+- Unlisted companies: no free consolidated financials. Expect to fill those by hand (MCA/Tofler/rating rationale).
+- Website heuristics (about/products/factories) work on standard sites; JS-heavy sites return nothing.
+- LinkedIn history cannot be automated. Ratings from snippets can be stale - verify.
 
 ## Upgrades if free isn't enough
 Screener.in export / Prowess / Tofler paid API for unlisted financials; Apollo/Lusha for the person.

@@ -50,4 +50,7 @@ if ok:
             if d.red_flags:
                 st.error("Red flags: " + "; ".join(d.red_flags))
             st.json(d.model_dump())
-            st.text_area("Raw research notes", r.notes, height=200, key="n" + d.company_name)
+            if d.chatgpt_prompt:
+                st.markdown("**Gaps - paste this into ChatGPT (as in your manual process):**")
+                st.code(d.chatgpt_prompt, language=None)
+            st.text_area("Raw research notes", r.notes, height=100, key="n" + d.company_name)

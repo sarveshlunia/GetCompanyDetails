@@ -75,7 +75,9 @@ class CompanyOnePager(BaseModel):
     listed_status: Optional[str] = Field(
         None, description="'Listed (NSE: XXX, BSE: 123456)' or 'Unlisted (Private)' / 'Unlisted (Public)'."
     )
-    market_cap: Amount = Field(default_factory=Amount, description="Only for listed companies; period = date of price.")
+    authorised_capital: Amount = Field(default_factory=Amount, description="Authorised share capital, Rs. crore (Zauba Corp).")
+    paid_up_capital: Amount = Field(default_factory=Amount, description="Paid-up share capital, Rs. crore (Zauba Corp).")
+    market_cap: Amount = Field(default_factory=Amount, description="Extra, listed companies only; period = date of price.")
     net_worth: Amount = Field(default_factory=Amount)
     non_current_investments: Amount = Field(default_factory=Amount)
     current_investments: Amount = Field(default_factory=Amount)
@@ -107,9 +109,11 @@ class CompanyOnePager(BaseModel):
         description="Rating downgrades, defaults, NCLT/insolvency, auditor qualifications, big losses. Empty if none found.",
     )
     sources: List[str] = Field(default_factory=list, description="All URLs used.")
+    field_sources: dict = Field(default_factory=dict, description="field name -> which source filled it.")
     data_gaps: List[str] = Field(
         default_factory=list, description="Fields that could not be found or verified, and why."
     )
+    chatgpt_prompt: str = Field("", description="Copy-paste prompt for fields free sources could not fill.")
     confidence: str = Field(
         "Low", description="'High' if figures come from annual report/exchange filings, 'Medium' if from aggregators, 'Low' otherwise."
     )

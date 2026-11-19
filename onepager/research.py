@@ -186,15 +186,55 @@ def _listed(sym: str, d: CompanyOnePager, notes: List[str]) -> None:
     notes.append(f"Yahoo Finance ticker {sym}; statements in INR, converted to Rs. crore.")
 
 
+def _apply_screener(sc, d: CompanyOnePager) -> None:
+    """Screener consolidated figures (already Rs. crore) override Yahoo's."""
+    def yf(m):
+        return [YearFigure(fiscal_year=y, value_cr=m[y], basis="Consolidated", source_url=sc.url)
+                for y in sorted(m, reverse=True)[:3]]
+    if sc.sales:
+        d.revenue = yf(sc.sales)
+    if sc.profit:
+        d.pat = yf(sc.profit)
+    for attr, val in (("net_worth", sc.net_worth), ("debt", sc.borrowings), ("non_current_investments", sc.investments)):
+        if val:
+            setattr(d, attr, Amount(value_cr=val[1], period=val[0], basis="Consolidated", source_url=sc.url))
+    d.sources.append(sc.url)
+    d.field_sources.update({k: "Screener (consolidated)" for k in ("revenue", "pat", "net_worth", "debt", "non_current_investments")
+                            if getattr(d, k)})
+
+
 def run_company(req: CompanyRequest, client=None) -> CompanyResult:
+    """Order follows the analyst's manual process:
+    Zauba (capital, directors) -> company website (about, address, products, factories) ->
+    Screener/Yahoo consolidated financials -> ratings search -> LinkedIn person -> ChatGPT gap prompt."""
+    from . import screener, website, zauba
+    from .prompts import gap_prompt
+
     res = CompanyResult(request=req)
     d = CompanyOnePager(company_name=req.name, confidence="Low")
     notes: List[str] = []
     try:
+        # 1. Zauba: authorised + paid-up capital, CIN, listing status, directors
+        z = zauba.fetch(req.name)
+        if z:
+            d.cin = z.cin
+            d.authorised_capital = Amount(value_cr=z.authorised_cr, basis="Zauba Corp", source_url=z.url)
+            d.paid_up_capital = Amount(value_cr=z.paid_up_cr, basis="Zauba Corp", source_url=z.url)
+            d.directors = [Person(name=n, designation=des, din=din) for n, des, din in z.directors[:10]]
+            d.corporate_address = z.address
+            d.listed_status = z.listing_status
+            d.sources.append(z.url)
+            d.field_sources.update({"authorised_capital": "Zauba", "paid_up_capital": "Zauba", "directors": "Zauba"})
+        else:
+            d.data_gaps.append(
+                "Zauba Corp unreachable/blocked or company not found: get authorised & paid-up capital and directors manually: "
+                f"https://www.zaubacorp.com/companysearchresults/{quote_plus(req.name)}")
+
+        # 2. Listed? Yahoo (profile + cash + fallback financials), then Screener (consolidated) overrides
         sym = None
         try:
             sym = _resolve_ticker(req)
-        except Exception as e:  # yfinance missing / network
+        except Exception as e:
             notes.append(f"Ticker lookup failed: {e}")
         if sym:
             try:
@@ -202,44 +242,67 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 d.confidence = "Medium"
             except Exception as e:
                 d.data_gaps.append(f"Yahoo Finance fetch failed for {sym}: {e}")
+            sc = screener.fetch(sym.split(".")[0])
+            if sc:
+                _apply_screener(sc, d)
+                d.confidence = "High" if d.revenue else d.confidence
+                if sc.rating_links:
+                    d.sources += sc.rating_links
+                    d.data_gaps.append("Rating rationale PDFs on Screener (open for the exact rating): " + ", ".join(sc.rating_links))
+            else:
+                d.data_gaps.append("Screener consolidated page not reachable; financials are Yahoo's - confirm they are consolidated.")
         else:
-            d.listed_status = "Unlisted / not found on NSE-BSE"
-            d.data_gaps.append(
-                "No NSE/BSE listing found, so no free structured financials. Look up: "
-                f"Tofler https://www.tofler.in/search?q={quote_plus(req.name)} | "
-                f"Zauba https://www.zaubacorp.com/companysearchresults/{quote_plus(req.name)} | "
-                f"MCA https://www.mca.gov.in (CIN, directors, charges). If listed, retry with the ticker in the Hint column (e.g. XYZ.NS)."
-            )
+            d.listed_status = d.listed_status or "Unlisted / not found on NSE-BSE"
+            d.data_gaps.append("Unlisted: net worth, investments, revenue, PAT, cash, debt need the consolidated balance sheet "
+                               f"(MCA filing / Tofler https://www.tofler.in/search?q={quote_plus(req.name)} / rating rationale).")
 
+        # 3. Company website: about, address, products, factories (website wins over Yahoo/Zauba text)
+        site_url = d.website
+        if not site_url and req.hint and re.search(r"\.[a-z]{2,}", req.hint) and ".NS" not in req.hint.upper() and ".BO" not in req.hint.upper():
+            site_url = req.hint if req.hint.startswith("http") else f"https://{req.hint}/"
+        if not site_url:
+            site_url = website.pick_site(_search(f'"{req.name}" official website', 8))
+        site = website.fetch(site_url) if site_url else None
+        if site:
+            d.website = site.url
+            d.sources += site.pages[:5]
+            for attr, val in (("about", site.about), ("corporate_address", site.address),
+                              ("products_and_services", site.products), ("factories", site.factories)):
+                if val:
+                    setattr(d, attr, val)
+                    d.field_sources[attr] = "Company website"
+            if not d.directors:
+                d.data_gaps.append("Directors: not on Zauba; check the website's Board/Leadership page, else ChatGPT prompt below.")
+        else:
+            d.data_gaps.append(f"Company website {'not reachable' if site_url else 'not found'}: about/address/products/factories need manual entry.")
+        for attr, label in (("about", "About"), ("corporate_address", "Corporate address"),
+                            ("products_and_services", "Products & services"), ("factories", "Factories")):
+            if not getattr(d, attr):
+                d.data_gaps.append(f"{label}: not found on website - use ChatGPT prompt below.")
+
+        # 4. Ratings (search snippets) - verify on agency site
         lt, st, rsrc = _ratings(d.company_name)
         d.long_term_rating, d.short_term_rating = lt, st
         d.sources += rsrc
-        if not lt.rating:
-            d.data_gaps.append("No credit rating found in search snippets - check CRISIL/ICRA/CARE sites directly.")
-        else:
-            d.data_gaps.append("Ratings come from search snippets and may be stale or mismatched - verify on the agency site.")
+        d.data_gaps.append("Ratings parsed from search snippets - verify on CRISIL/ICRA/CARE/Screener." if lt.rating
+                           else "No rating found in search snippets - check Screener's 'Credit ratings' / agency site.")
 
-        d.recent_news = [
-            f"{r.get('date','')[:10]} {r.get('title','')} ({r.get('source','')})".strip()
-            for r in _search(f'"{d.company_name}"', 5, news=True)
-        ]
-        flag_re = re.compile(r"downgrad|default|insolven|nclt|fraud|raid|qualif|resign|penalt|probe", re.I)
-        d.red_flags = [n for n in d.recent_news if flag_re.search(n)]
+        # 5. News + red flags
+        d.recent_news = [f"{r.get('date','')[:10]} {r.get('title','')} ({r.get('source','')})".strip()
+                         for r in _search(f'"{d.company_name}"', 5, news=True)]
+        d.red_flags = [n for n in d.recent_news
+                       if re.search(r"downgrad|default|insolven|nclt|fraud|raid|qualif|resign|penalt|probe", n, re.I)]
 
-        for key, q in (("factories", f'"{d.company_name}" manufacturing plants locations'),
-                       ("group_companies", f'"{d.company_name}" subsidiaries group companies')):
-            hits = _search(q, 3)
-            setattr(d, key, [f"(search lead, verify) {h.get('title','')} - {h.get('href','')}" for h in hits])
-        if not d.about:
-            hits = _search(f'"{d.company_name}" company profile India', 3)
-            if hits:
-                d.about = f"(search snippet) {hits[0].get('body','')}"
+        # 6. Meetup person: LinkedIn link + headline; history needs manual/ChatGPT
         if req.meetup_person:
             d.meetup_person = _person(req.meetup_person, d.company_name)
             if not d.meetup_person.linkedin_url:
                 d.data_gaps.append("LinkedIn profile not found via public search; search manually.")
-            d.data_gaps.append("LinkedIn career history cannot be read without logging in; open the profile.")
-        d.data_gaps += ["Products & services, factories, group companies: only search leads (no structured free source)."]
+            d.data_gaps.append("LinkedIn work history (company, from-to years) needs a logged-in view: open the profile or use the ChatGPT prompt.")
+
+        d.group_companies = d.group_companies or []
+        d.data_gaps.append("Group companies: no structured free source.")
+        d.chatgpt_prompt = gap_prompt(d, req.meetup_person or "")
         res.data, res.notes = d, "\n".join(notes)
     except Exception as e:
         res.error = str(e)

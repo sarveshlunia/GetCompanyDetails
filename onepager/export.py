@@ -66,7 +66,8 @@ def _fields(d: CompanyOnePager) -> dict:
         "about": [d.about or NA],
         "corporate address": [d.corporate_address or NA],
         "listed / unlisted": [d.listed_status or NA],
-        "market cap": [_cr(d.market_cap) if d.market_cap.value_cr is not None else "Not applicable / not available"],
+        "market cap": [f"Authorised Capital: {_cr(d.authorised_capital)}", f"Paid-up Capital: {_cr(d.paid_up_capital)}"]
+                      + ([f"Market Cap (listed, extra): {_cr(d.market_cap)}"] if d.market_cap.value_cr is not None else []),
         "net worth": [_cr(d.net_worth)],
         "investment detail": [
             f"Non-Current Investments: {_cr(d.non_current_investments)}",
@@ -153,7 +154,7 @@ def build_xlsx(items: List[CompanyOnePager]) -> bytes:
     ws = wb.active
     ws.title = "Summary"
     ws.append([
-        "Company", "CIN", "Listed/Unlisted", "Market Cap (Cr)", "Net Worth (Cr)",
+        "Company", "CIN", "Listed/Unlisted", "Authorised Capital (Cr)", "Paid-up Capital (Cr)", "Market Cap (Cr)", "Net Worth (Cr)",
         "Revenue FY-1 (Cr)", "Revenue FY-2 (Cr)", "Revenue FY-3 (Cr)",
         "PAT FY-1 (Cr)", "PAT FY-2 (Cr)", "PAT FY-3 (Cr)",
         "Cash (Cr)", "Debt (Cr)", "Non-Current Inv (Cr)", "Current Inv (Cr)",
@@ -167,7 +168,7 @@ def build_xlsx(items: List[CompanyOnePager]) -> bytes:
 
     for d in items:
         ws.append([
-            d.company_name, d.cin, d.listed_status, d.market_cap.value_cr, d.net_worth.value_cr,
+            d.company_name, d.cin, d.listed_status, d.authorised_capital.value_cr, d.paid_up_capital.value_cr, d.market_cap.value_cr, d.net_worth.value_cr,
             yv(d.revenue, 0), yv(d.revenue, 1), yv(d.revenue, 2),
             yv(d.pat, 0), yv(d.pat, 1), yv(d.pat, 2),
             d.cash_and_equivalents.value_cr, d.debt.value_cr,
