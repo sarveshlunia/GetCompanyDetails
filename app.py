@@ -81,6 +81,8 @@ def row(label: str, value: str, side_md: str = ""):
 
 
 def render(d, i: int):
+    for al in d.alerts:
+        st.error(al)
     if d.red_flags:
         st.error("Red flags: " + " | ".join(d.red_flags))
     E = lambda v: v is None or v == "" or v == []

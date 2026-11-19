@@ -26,16 +26,51 @@ def drain() -> List[str]:
     return lines
 
 
-def get(url: str, timeout: int = 15, accept_json: bool = False) -> Optional[str]:
-    try:
-        r = requests.get(url, headers={"User-Agent": UA, "Accept-Language": "en-IN,en;q=0.9",
-                                       **({"Accept": "application/json"} if accept_json else {})}, timeout=timeout)
-        if r.status_code == 200 and r.text:
-            log(f"OK   200 {url}")
-            return r.text
-        log(f"FAIL {r.status_code} {url}" + (" (blocked by site?)" if r.status_code in (403, 429, 503) else ""))
-    except requests.RequestException as e:
-        log(f"FAIL {type(e).__name__} {url}")
+def peek() -> List[str]:
+    """This thread's log so far (not cleared)."""
+    return list(getattr(_tl, "lines", []))
+
+
+def _session(url: str) -> "requests.Session":
+    """One cookie-keeping session per thread+host; the site's home page is visited once first, like a browser would."""
+    from urllib.parse import urlparse
+    host = urlparse(url).netloc
+    sessions = getattr(_tl, "sessions", None)
+    if sessions is None:
+        sessions = _tl.sessions = {}
+    if host not in sessions:
+        sess = requests.Session()
+        sess.headers.update({"User-Agent": UA, "Accept-Language": "en-IN,en;q=0.9",
+                             "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8"})
+        try:
+            sess.get(f"{urlparse(url).scheme}://{host}/", timeout=15)
+        except requests.RequestException:
+            pass
+        sessions[host] = sess
+    return sessions[host]
+
+
+def get(url: str, timeout: int = 15, accept_json: bool = False, session: bool = False) -> Optional[str]:
+    import time
+    for attempt in (1, 2):
+        try:
+            if session:
+                sess = _session(url)
+                hdr = {"Referer": url.rsplit("/", 2)[0] + "/"} | ({"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"} if accept_json else {})
+                r = sess.get(url, headers=hdr, timeout=timeout)
+            else:
+                r = requests.get(url, headers={"User-Agent": UA, "Accept-Language": "en-IN,en;q=0.9",
+                                               **({"Accept": "application/json"} if accept_json else {})}, timeout=timeout)
+            if r.status_code == 200 and r.text:
+                log(f"OK   200 {url}")
+                return r.text
+            log(f"FAIL {r.status_code} {url}" + (" (blocked by site?)" if r.status_code in (403, 429, 503) else ""))
+            if r.status_code in (429, 503, 403) and attempt == 1:
+                time.sleep(2.0)
+                continue
+        except requests.RequestException as e:
+            log(f"FAIL {type(e).__name__} {url}")
+        return None
     return None
 
 

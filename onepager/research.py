@@ -246,6 +246,9 @@ def _yahoo(sym: str):
 
 def _apply_screener(sc, d: CompanyOnePager, cands: List[Cand]) -> None:
     """Screener consolidated figures (already Rs. crore) become candidates; priority is decided later."""
+    if not sc.sales:
+        labels = list((sc.tables.get("Profit & Loss") or {}).keys())
+        d.alerts.append(f"Screener page was read but has no Sales/Revenue row (rows found: {labels[:8]}). Revenue is left blank on purpose.")
     for field, m in (("revenue", sc.sales), ("pat", sc.profit)):
         for y in sorted(m, reverse=True)[:3]:
             cands.append(Cand(field, y, m[y], "Screener", sc.url, sc.basis, 0, f"Screener {sc.basis.lower()} table", "api"))
@@ -357,6 +360,11 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
         if sym:
             sc = _try(d, "Screener page", screener.fetch, sym.split(".")[0])
             sc_url = sc.url if sc else f"https://www.screener.in/company/{sym.split('.')[0]}/consolidated/"
+        if sym and not sc:
+            why = next((l for l in reversed(http.peek()) if "screener.in" in l and l.startswith(("FAIL", "ERROR"))), "no response")
+            d.alerts.append(f"Screener could not be read for {sym.split('.')[0]} ({why[:140]}). For a listed company numbers come ONLY from Screener, "
+                            "so revenue/PAT/net worth/debt are left blank (no PDF or website numbers are substituted). "
+                            f"Check https://www.screener.in/company/{sym.split('.')[0]}/consolidated/ opens for you, then run again.")
         tried(NUM_FIELDS + ["about", "listed_status", "industry"], "Screener", sc_url or f"https://www.google.com/search?q={quote_plus(req.name + ' site:screener.in')}",
               bool(sc), "page read" if sc else ("page not reachable" if sym else "no Screener page (unlisted?)"))
         if sc:
@@ -374,6 +382,10 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 d.data_gaps.append("Rating rationale documents on Screener (open for the exact rating): " + ", ".join(sc.rating_links))
         if sym and not sc:
             d.data_gaps.append("Screener page not reachable - numbers fall back to the next sources (unverified).")
+
+        # Numbers: listed companies take them ONLY from Screener. Other sources may fill just the lines Screener never reports,
+        # or everything when the company is not on Screener at all (unlisted).
+        allowed = ["current_investments"] if sc else ([] if sym else list(NUM_FIELDS))
 
         # ------------------------------------------------------------------ 2. ZAUBA
         z = _try(d, "Zauba", zauba.fetch, req.name)
@@ -419,14 +431,14 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
 
         # numbers still missing after Screener -> the company's own financial pages, then (optionally) its annual-report PDF
         have = {c.field for c in cands}
-        missing = [f for f in NUM_FIELDS if f not in have]
+        missing = [f for f in allowed if f not in have]
         if missing and site:
             for url, html in site.fin_html:
                 got = _try(d, "Website financial page", fin_extract.from_html, html, "Company website", url, default=[])
                 cands += [c for c in got if c.field in missing]
                 tried(missing, "Company website", url, bool(got), f"{len(got)} numbers read" if got else "no labelled numbers with a readable year+unit")
             have = {c.field for c in cands}
-            missing = [f for f in NUM_FIELDS if f not in have]
+            missing = [f for f in allowed if f not in have]
         if missing and ALLOW_PDF:
             pdfs = list(dict.fromkeys((site.annual_reports if site else []) + (sc.annual_reports if sc else [])))
             for url in pdfs[:1]:
@@ -434,7 +446,7 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 cands += [c for c in got if c.field in missing]
                 tried(missing, "Annual report PDF", url, bool(got), f"{len(got)} numbers read (unverified)" if got else "no readable numbers (scanned/odd layout)")
             have = {c.field for c in cands}
-            missing = [f for f in NUM_FIELDS if f not in have]
+            missing = [f for f in allowed if f not in have]
 
         # ------------------------------------------------------------------ 4. OTHER SITES
         info, tick = {}, None
@@ -460,7 +472,7 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
             cands += [c for c in got if c.field in missing]
             tried(missing, "Yahoo Finance", yurl + "/financials", bool(got), "statement rows read (unverified)" if got else "no data")
             have = {c.field for c in cands}
-            missing = [f for f in NUM_FIELDS if f not in have]
+            missing = [f for f in allowed if f not in have]
 
         w = _try(d, "Wikipedia/Wikidata", wiki.fetch, d.company_name, lambda t: similar(d.company_name, t) >= 0.55)
         tried(["about", "group_companies"], "Wikipedia/Wikidata", w.url if w else "https://en.wikipedia.org/w/index.php?search=" + quote_plus(d.company_name),

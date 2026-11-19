@@ -8,7 +8,12 @@ from typing import Dict, List, Optional
 
 from bs4 import BeautifulSoup
 
-from .http import get
+from . import http as _http
+from .http import log
+
+
+def get(url: str, **kw):
+    return _http.get(url, session=True, **kw)
 
 URL = "https://www.screener.in/company/{sym}/consolidated/"
 
@@ -91,7 +96,7 @@ def parse(html: str, url: str = "") -> ScreenerData:
     if sec and re.search(r"Standalone Figures", sec.get_text(" ")):
         s.basis = "Standalone"   # company has no consolidated accounts; Screener shows standalone
     pl, bs = _table(soup, "profit-loss"), _table(soup, "balance-sheet")
-    s.sales = pl.get("Sales", pl.get("Revenue", {}))
+    s.sales = next((v for k, v in pl.items() if re.match(r"^(sales|revenue|total income|income|interest earned)\b", k, re.I) and v), {})
     s.profit = pl.get("Net Profit", {})
 
     def last(row):
@@ -153,9 +158,15 @@ def parse(html: str, url: str = "") -> ScreenerData:
 
 
 def fetch(symbol: str) -> Optional[ScreenerData]:
-    url = URL.format(sym=symbol)
-    html = get(url)
-    if not html or not re.search(r'id="profit-loss"', html):
+    url, html = None, None
+    for u in (URL.format(sym=symbol), f"https://www.screener.in/company/{symbol}/"):
+        h = get(u)
+        if h and re.search(r'id="profit-loss"', h):
+            url, html = u, h
+            break
+        if h:
+            log(f"FAIL Screener page {u} loaded but has no #profit-loss section (login wall, captcha or layout change?)")
+    if not html:
         return None
     sc = parse(html, url)
     if sc.warehouse_id:
