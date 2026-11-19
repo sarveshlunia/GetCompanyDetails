@@ -8,6 +8,8 @@ import streamlit as st
 from onepager.export import build_docx, build_xlsx, build_zip
 from onepager.parse_input import from_file, from_text
 from onepager.research import run_company
+from onepager import zauba
+from urllib.parse import quote_plus
 from onepager.schema import Amount, Person, Rating, YearFigure
 
 st.set_page_config(page_title="Company One-Pager", layout="wide")
@@ -160,6 +162,8 @@ if st.button("Generate", type="primary", disabled=not reqs):
             bar.progress(n / len(reqs), text=f"{n}/{len(reqs)} done")
     st.session_state["results"] = results
 
+if "flash" in st.session_state:
+    st.success(st.session_state.pop("flash"))
 results = st.session_state.get("results", [])
 for r in results:
     if r.error:
@@ -181,6 +185,34 @@ if ok:
             st.download_button("Download this one-pager (.docx)", build_docx(d), f"{d.company_name}.docx", key=f"dl{i}")
             with st.expander("Fill / correct missing fields (flows into the download)"):
                 edit(d, i)
+            if any("Zauba" in g for g in d.data_gaps) or d.authorised_capital.value_cr is None:
+                with st.expander("Zauba blocked? Paste the page here (fixes capital + directors in 30 seconds)", expanded=True):
+                    st.markdown(f"1. Open [Zauba search for {d.company_name}](https://www.zaubacorp.com/companysearchresults/{quote_plus(d.company_name)}) "
+                                "in your normal browser and click the company.  \n2. Press **Ctrl+A**, then **Ctrl+C** on the company page.  \n"
+                                "3. Paste below and click Apply.")
+                    pasted = st.text_area("Zauba page text", key=f"zp{i}", height=120)
+                    if st.button("Apply pasted Zauba data", key=f"za{i}") and pasted.strip():
+                        z = zauba.parse_text(pasted)
+                        got = []
+                        if z.authorised_cr is not None:
+                            d.authorised_capital = Amount(value_cr=z.authorised_cr, basis="Zauba (pasted)"); got.append("authorised capital")
+                        if z.paid_up_cr is not None:
+                            d.paid_up_capital = Amount(value_cr=z.paid_up_cr, basis="Zauba (pasted)"); got.append("paid-up capital")
+                        if z.cin:
+                            d.cin = z.cin; got.append("CIN")
+                        if z.listing_status:
+                            d.listed_status = z.listing_status if not (d.listed_status or "").startswith("Listed") else d.listed_status
+                        if z.directors:
+                            d.directors = [Person(name=n, designation=des, din=din) for n, des, din in z.directors[:10]]; got.append(f"{len(z.directors)} directors")
+                        if z.address and not d.corporate_address:
+                            d.corporate_address = z.address
+                        for k in ("authorised_capital", "paid_up_capital", "directors"):
+                            d.field_sources[k] = "Zauba (pasted)"
+                        d.data_gaps = [g for g in d.data_gaps if "Zauba" not in g]
+                        for key in [k for k in st.session_state.keys() if str(k).startswith(f"{i}_")]:
+                            del st.session_state[key]  # let the edit boxes below pick up the new values
+                        st.session_state["flash"] = f"{d.company_name}: found {', '.join(got) or 'nothing recognisable - check you copied the company page'}"
+                        st.rerun()
             if d.data_gaps:
                 with st.expander(f"Gaps ({len(d.data_gaps)}) - what was not found and why"):
                     for g in d.data_gaps:

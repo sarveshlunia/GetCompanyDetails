@@ -65,7 +65,8 @@ def parse_company_page(html: str, url: str = "") -> ZaubaData:
 
 
 def fetch(name: str) -> Optional[ZaubaData]:
-    html = get(SEARCH.format(q=quote_plus(name)))
+    from .http import get_browser
+    html = get(SEARCH.format(q=quote_plus(name))) or get_browser(SEARCH.format(q=quote_plus(name)))
     if not html:
         return None
     soup = BeautifulSoup(html, "html.parser")
@@ -73,5 +74,36 @@ def fetch(name: str) -> Optional[ZaubaData]:
     if not link:
         return None
     url = link if link.startswith("http") else "https://www.zaubacorp.com" + link
-    page = get(url)
+    page = get(url) or get_browser(url)
     return parse_company_page(page, url) if page else None
+
+
+_CIN = re.compile(r"\b[LU]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6}\b")
+_AMT = r"((?:\u20b9|rs\.?|inr)?\s*\d[\d,]*(?:\.\d+)?\s*(?:crore|cr|lakh|lac)?)"
+_DES = r"(Managing Director|Whole[- ]?time Director|Additional Director|Independent Director|Nominee Director|Director|Chairman|CEO|CFO|Company Secretary|Manager)"
+
+
+def parse_text(text: str, url: str = "pasted from Zauba") -> ZaubaData:
+    """Parse the plain text of a Zauba company page that the user copied from their own browser."""
+    t = re.sub(r"[ \t\u00a0]+", " ", text)
+    z = ZaubaData(url=url)
+    if m := _CIN.search(t):
+        z.cin = m.group(0)
+    if m := re.search(r"authori[sz]ed\s+capital\D{0,30}?" + _AMT, t, re.I):
+        z.authorised_cr = inr_to_cr(m.group(1))
+    if m := re.search(r"paid[\s-]*up\s+capital\D{0,30}?" + _AMT, t, re.I):
+        z.paid_up_cr = inr_to_cr(m.group(1))
+    if m := re.search(r"listing\s+status\s*[:\-]?\s*(Listed|Unlisted)", t, re.I):
+        z.listing_status = m.group(1).capitalize()
+    if m := re.search(r"registered\s+(?:office\s+)?address\s*[:\-]?\s*(.{20,220}?\b\d{6}\b)", t, re.I | re.S):
+        z.address = re.sub(r"\s+", " ", m.group(1)).strip()
+    seen = set()
+    for pat, order in ((r"(\d{8})\s+([A-Za-z][A-Za-z .'-]{2,40}?)\s+" + _DES, ("din", "name", "des")),
+                       (r"([A-Za-z][A-Za-z .'-]{2,40}?)\s+(\d{8})\s+" + _DES, ("name", "din", "des")),
+                       (r"([A-Za-z][A-Za-z .'-]{2,40}?)\s+" + _DES + r"\s+(\d{8})", ("name", "des", "din"))):
+        for m in re.finditer(pat, t):
+            g = dict(zip(order, m.groups()))
+            if g["din"] not in seen:
+                seen.add(g["din"])
+                z.directors.append((g["name"].strip().title(), g["des"], g["din"]))
+    return z

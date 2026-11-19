@@ -56,3 +56,28 @@ def inr_to_cr(text: str) -> Optional[float]:
     if "lakh" in t or "lac" in t:
         return round(v / 100, 4)
     return round(v / 1e7, 4)
+
+
+def get_browser(url: str, timeout_ms: int = 25000) -> Optional[str]:
+    """Optional: real headless Chromium (passes some bot checks that plain requests can't).
+    Only used if `playwright` + its browser are installed (run ENABLE_BROWSER_MODE)."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+    try:
+        with sync_playwright() as pw:
+            b = pw.chromium.launch(headless=True)
+            page = b.new_page(user_agent=UA, locale="en-IN")
+            page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+            html = page.content()
+            b.close()
+        if re.search(r"just a moment|verify you are human|attention required", html, re.I) and len(html) < 20000:
+            log(f"FAIL browser challenge page {url}")
+            return None
+        log(f"OK   browser {url}")
+        return html
+    except Exception as e:
+        log(f"FAIL browser {type(e).__name__} {url}")
+        return None
