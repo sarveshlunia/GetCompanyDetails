@@ -1,7 +1,6 @@
 """Streamlit UI: type or upload Indian company names, get one-pagers (Word) + summary (Excel)."""
 
 import concurrent.futures as cf
-import os
 
 import streamlit as st
 
@@ -12,17 +11,13 @@ from onepager.research import run_company
 st.set_page_config(page_title="Company One-Pager", layout="wide")
 st.title("Indian Company One-Pager Generator")
 
-if not os.getenv("ANTHROPIC_API_KEY"):
-    st.error("Set ANTHROPIC_API_KEY before starting the app.")
-    st.stop()
-
 typed = st.text_area(
-    "Type company names (one per line). Optional: `Company | Meetup person | City/website/CIN`",
+    "Type company names (one per line). Optional: `Company | Meetup person | Ticker e.g. XYZ.NS`",
     height=140,
     placeholder="Tata Motors Limited\nSupreme Industries | Ramesh Kumar | Mumbai",
 )
 up = st.file_uploader("...or upload CSV / XLSX / TXT (columns: Company, Meetup Person, Hint)", type=["csv", "xlsx", "txt"])
-workers = st.slider("Parallel companies", 1, 5, 3, help="Each company takes ~2-5 minutes and uses real API credits.")
+workers = st.slider("Parallel companies", 1, 5, 3, help="~20-60 s per company; keep low to avoid search rate limits.")
 
 reqs = from_text(typed)
 if up:

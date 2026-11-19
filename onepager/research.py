@@ -1,75 +1,31 @@
-"""Research an Indian company with Claude + web search, then structure it.
+"""Free, key-less company research for Indian companies.
 
-Two steps per company:
-  1. Research: Claude searches and reads the web (server-side web_search /
-     web_fetch tools) and writes detailed notes with a source URL per figure.
-  2. Extract: a second call turns those notes into a validated
-     CompanyOnePager (structured output). Kept separate because web search
-     answers carry citations, which can't be combined with structured output.
+Sources (all free, no API key, no LLM):
+  * Yahoo Finance via `yfinance`  -> listed companies: profile, market cap, 3-4y revenue/PAT,
+                                     net worth, investments, cash, debt, executives
+  * DuckDuckGo via `ddgs`         -> credit ratings (snippets), LinkedIn profile URL (search result
+                                     only, never scraped), news, plant/group-company leads
+Unlisted companies get far less: Yahoo has nothing on them. The tool says so and gives lookup links.
 """
 
 from __future__ import annotations
 
-import os
+import re
 from dataclasses import dataclass
 from datetime import date
-from typing import Optional
+from typing import Any, List, Optional
+from urllib.parse import quote_plus
 
-import anthropic
+from .schema import Amount, CompanyOnePager, MeetupPerson, Person, Rating, YearFigure
 
-from .schema import CompanyOnePager
-
-MODEL = os.getenv("ONEPAGER_MODEL", "claude-opus-5-5")
-EFFORT = os.getenv("ONEPAGER_EFFORT", "high")  # low | medium | high | xhigh | max
-MAX_SEARCHES = int(os.getenv("ONEPAGER_MAX_SEARCHES", "15"))
-MAX_FETCHES = int(os.getenv("ONEPAGER_MAX_FETCHES", "10"))
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
-
-RESEARCH_SYSTEM = """You are a corporate research analyst preparing a pre-meeting one-pager on an Indian company.
-Today is {today}.
-
-Find, for the company named by the user:
-- Legal name, CIN, website, industry, incorporation year
-- About (what they do, scale, key customers/markets)
-- Registered / corporate office address
-- Listed or unlisted (with NSE symbol / BSE code if listed), market cap with its date, promoter holding
-- Net worth; non-current and current investments; cash and cash equivalents; total borrowings
-- Revenue from operations and PAT for the latest 3 fiscal years
-- Long-term and short-term credit ratings with agency and date
-- Current directors (with designation, DIN if visible)
-- Products & services; factory / plant locations; group companies (holding, subsidiaries, JVs)
-- Material news from the last 12 months and any red flags (downgrades, defaults, NCLT, auditor qualifications)
-{person_block}
-
-Source priority (use the best available, say which you used):
-1. Annual report, NSE/BSE filings and investor presentations
-2. Credit rating rationales (CRISIL, ICRA, CARE, India Ratings, Acuite, Brickwork, Infomerics) - these are the best source of financials for UNLISTED companies
-3. Screener.in, Moneycontrol, Tofler, Zauba Corp, The Company Check, company website
-4. Reputable news (Economic Times, Business Standard, Mint, Reuters)
-
-Rules:
-- Indian fiscal years: FY2026 = April 2025 to March 2026. Label every figure with its fiscal year.
-- Convert every amount to Rs. crore (1 crore = 10 million; 1 lakh crore = 100,000 crore). Prefer consolidated; state the basis.
-- Put the source URL next to every number.
-- If the name is ambiguous (several companies share it), pick the most likely one, state the CIN, and list the alternatives.
-- Never invent a number, a person, or a LinkedIn URL. If you can't find something, write "NOT FOUND" and why
-  (e.g. "FY2026 accounts not yet filed with MCA").
-- Write plain notes, not a polished report."""
-
-PERSON_BLOCK = """- The meetup person: {person}. Find their current designation, public LinkedIn profile URL
-  (only if it appears in search results) and career history from public sources (LinkedIn snippets, company
-  site, news, exchange filings). Do not guess."""
-
-EXTRACT_SYSTEM = """Convert the research notes into the JSON schema. Copy values exactly; do not add facts that are not
-in the notes. Use null for anything marked NOT FOUND and record it in data_gaps. Amounts in Rs. crore.
-Revenue and PAT: newest fiscal year first, max 3 entries."""
+CR = 1e7  # 1 crore = 10 million
 
 
 @dataclass
 class CompanyRequest:
     name: str
     meetup_person: Optional[str] = None
-    hint: Optional[str] = None  # city / website / CIN to disambiguate
+    hint: Optional[str] = None  # ticker (e.g. RELIANCE.NS), city or website
 
 
 @dataclass
@@ -80,92 +36,211 @@ class CompanyResult:
     error: Optional[str] = None
 
 
-def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(max_retries=4, timeout=900)
-
-
-def _text(content) -> str:
-    return "\n".join(b.text for b in content if getattr(b, "type", None) == "text")
-
-
-def research_notes(req: CompanyRequest, client: Optional[anthropic.Anthropic] = None) -> str:
-    client = client or _client()
-    person_block = PERSON_BLOCK.format(person=req.meetup_person) if req.meetup_person else ""
-    system = RESEARCH_SYSTEM.format(today=date.today().isoformat(), person_block=person_block)
-    ask = f"Company: {req.name}"
-    if req.hint:
-        ask += f"\nDisambiguation hint: {req.hint}"
-
-    tools = [
-        {
-            "type": "web_search_20260209",
-            "name": "web_search",
-            "max_uses": MAX_SEARCHES,
-            "user_location": {"type": "approximate", "country": "IN"},
-        },
-        {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": MAX_FETCHES},
-    ]
-    messages = [{"role": "user", "content": ask}]
-
-    # A long server-tool turn can pause; send it back so the server continues.
-    for _ in range(6):
-        with client.beta.messages.stream(
-            model=MODEL,
-            max_tokens=32000,
-            system=system,
-            tools=tools,
-            messages=messages,
-            output_config={"effort": EFFORT},
-            betas=[FALLBACK_BETA],
-            fallbacks="default",
-        ) as stream:
-            response = stream.get_final_message()
-
-        if response.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": response.content})
-            continue
-        if response.stop_reason == "refusal":
-            raise RuntimeError("Model declined the research request.")
-        return _text(response.content)
-
-    raise RuntimeError("Research did not finish after several continuations.")
-
-
-def extract(notes: str, req: CompanyRequest, client: Optional[anthropic.Anthropic] = None) -> CompanyOnePager:
-    client = client or _client()
-    response = client.beta.messages.parse(
-        model=MODEL,
-        max_tokens=16000,
-        system=EXTRACT_SYSTEM,
-        messages=[{"role": "user", "content": f"Company requested: {req.name}\n\nResearch notes:\n{notes}"}],
-        output_format=CompanyOnePager,
-        output_config={"effort": "low"},
-        betas=[FALLBACK_BETA],
-        fallbacks="default",
-    )
-    if response.stop_reason == "refusal" or response.parsed_output is None:
-        raise RuntimeError(f"Extraction failed (stop_reason={response.stop_reason}).")
-    data = response.parsed_output
-    # The person we were asked about is authoritative even if research found nothing.
-    if req.meetup_person and not data.meetup_person.name:
-        data.meetup_person.name = req.meetup_person
-    return data
-
-
-def run_company(req: CompanyRequest, client: Optional[anthropic.Anthropic] = None) -> CompanyResult:
-    client = client or _client()
-    result = CompanyResult(request=req)
+# ---------------------------------------------------------------- helpers
+def _num(x: Any) -> Optional[float]:
     try:
-        result.notes = research_notes(req, client)
-        result.data = extract(result.notes, req, client)
-    except anthropic.AuthenticationError:
-        result.error = "Invalid or missing ANTHROPIC_API_KEY."
-    except anthropic.RateLimitError:
-        result.error = "Rate limited by the API - retry later or lower concurrency."
-    except anthropic.APIStatusError as e:
-        result.error = f"API error {e.status_code}: {e.message}"
-    except anthropic.APIConnectionError:
-        result.error = "Network error reaching the API."
-    except Exception as e:  # keep the batch going; report per company
-        result.error = str(e)
-    return result
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return None if v != v else v  # NaN -> None
+
+
+def _cr(x: Any) -> Optional[float]:
+    v = _num(x)
+    return None if v is None else round(v / CR, 2)
+
+
+def _row(df, names: List[str]):
+    """First matching row of a yfinance statement as {Timestamp: value}."""
+    if df is None or getattr(df, "empty", True):
+        return {}
+    for n in names:
+        if n in df.index:
+            return {c: df.loc[n, c] for c in df.columns}
+    return {}
+
+
+def _fy(ts) -> str:
+    """Indian FY label: year-end 31-Mar-2025 -> FY2025."""
+    return f"FY{ts.year + (1 if ts.month > 3 else 0)}"
+
+
+def _years(series: dict, basis: str = "Consolidated") -> List[YearFigure]:
+    out = []
+    for ts in sorted(series, reverse=True)[:3]:
+        v = _cr(series[ts])
+        if v is not None:
+            out.append(YearFigure(fiscal_year=_fy(ts), value_cr=v, basis=basis, source_url="Yahoo Finance"))
+    return out
+
+
+def _latest(series: dict, period_note: str = "") -> Amount:
+    for ts in sorted(series, reverse=True):
+        v = _cr(series[ts])
+        if v is not None:
+            return Amount(value_cr=v, period=_fy(ts), basis="Consolidated", source_url="Yahoo Finance")
+    return Amount()
+
+
+# ---------------------------------------------------------------- web search
+def _search(query: str, n: int = 6, news: bool = False) -> List[dict]:
+    try:
+        from ddgs import DDGS
+
+        with DDGS() as d:
+            res = d.news(query, region="in-en", max_results=n) if news else d.text(query, region="in-en", max_results=n)
+            return list(res or [])
+    except Exception:
+        return []
+
+
+_RATING_RE = re.compile(
+    r"(CRISIL|ICRA|CARE|India Ratings|IND|Acuite|ACUITE|Brickwork|BWR|Infomerics)"
+    r"[^.\n]{0,60}?\b((?:AAA|AA\+|AA-|AA|A\+|A-|BBB\+|BBB-|BBB|BB\+|BB-|BB|B\+|B-|D)"
+    r"(?:\s*\(?\s*(?:Stable|Positive|Negative|CE)\s*\)?)?)(?![\w+])"
+)
+_SHORT_RE = re.compile(r"\b(A[1-4]\+?)(?![\w+])")
+
+
+def _ratings(name: str):
+    lt, st, sources = Rating(), Rating(), []
+    for r in _search(f'"{name}" credit rating rationale CRISIL ICRA CARE long term short term', 8):
+        text = f"{r.get('title','')} {r.get('body','')}"
+        url = r.get("href")
+        if not lt.rating and (m := _RATING_RE.search(text)):
+            lt = Rating(rating=m.group(2).strip(), agency=m.group(1), source_url=url)
+        if not st.rating and (m := _SHORT_RE.search(text)):
+            st = Rating(rating=m.group(1), source_url=url)
+        if url:
+            sources.append(url)
+    return lt, st, sources[:3]
+
+
+def _person(name: str, company: str, designation_hint: bool = True) -> MeetupPerson:
+    mp = MeetupPerson(name=name)
+    for r in _search(f'site:linkedin.com/in "{name}" "{company}"', 5):
+        url = r.get("href", "")
+        if "linkedin.com/in/" in url:
+            mp.linkedin_url = url
+            # Typical title: "Name - Designation - Company | LinkedIn"
+            parts = [p.strip() for p in re.split(r"\s[-–|]\s", r.get("title", ""))]
+            if len(parts) >= 2 and parts[1].lower() != "linkedin":
+                mp.designation = parts[1]
+            if r.get("body"):
+                mp.career_history = [r["body"][:300] + "  (LinkedIn search snippet - open profile for full history)"]
+            break
+    return mp
+
+
+# ---------------------------------------------------------------- ticker
+def _resolve_ticker(req: CompanyRequest) -> Optional[str]:
+    import yfinance as yf
+
+    if req.hint and re.fullmatch(r"[A-Za-z0-9&\-]+\.(NS|BO)", req.hint.strip()):
+        return req.hint.strip().upper()
+    try:
+        quotes = yf.Search(req.name, max_results=10).quotes
+    except Exception:
+        return None
+    cands = [q for q in quotes if str(q.get("symbol", "")).endswith((".NS", ".BO"))]
+    cands.sort(key=lambda q: 0 if q["symbol"].endswith(".NS") else 1)
+    return cands[0]["symbol"] if cands else None
+
+
+# ---------------------------------------------------------------- main
+def _listed(sym: str, d: CompanyOnePager, notes: List[str]) -> None:
+    import yfinance as yf
+
+    t = yf.Ticker(sym)
+    info = t.info or {}
+    exch = "NSE" if sym.endswith(".NS") else "BSE"
+    d.company_name = info.get("longName") or d.company_name
+    d.listed_status = f"Listed ({exch}: {sym.split('.')[0]})"
+    d.website = info.get("website")
+    d.industry = ", ".join(x for x in (info.get("sector"), info.get("industry")) if x) or None
+    d.about = info.get("longBusinessSummary")
+    addr = [info.get(k) for k in ("address1", "address2", "city", "state", "zip", "country")]
+    d.corporate_address = ", ".join(str(a) for a in addr if a) or None
+    mc = _cr(info.get("marketCap"))
+    if mc is not None:
+        d.market_cap = Amount(value_cr=mc, period=date.today().isoformat(), source_url="Yahoo Finance")
+    d.directors = [
+        Person(name=o["name"], designation=o.get("title"))
+        for o in (info.get("companyOfficers") or [])[:10] if o.get("name")
+    ]
+    if d.directors:
+        d.data_gaps.append("'Directors' lists key executives from Yahoo; full board (with DINs) is on MCA / BSE-NSE filings.")
+
+    inc, bal = t.income_stmt, t.balance_sheet
+    d.revenue = _years(_row(inc, ["Total Revenue", "Operating Revenue"]))
+    d.pat = _years(_row(inc, ["Net Income", "Net Income Common Stockholders"]))
+    d.net_worth = _latest(_row(bal, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"]))
+    d.non_current_investments = _latest(_row(bal, ["Long Term Equity Investment", "Investments And Advances", "Investmentin Financial Assets"]))
+    d.current_investments = _latest(_row(bal, ["Other Short Term Investments", "Available For Sale Securities", "Short Term Investments"]))
+    d.cash_and_equivalents = _latest(_row(bal, ["Cash Cash Equivalents And Short Term Investments", "Cash And Cash Equivalents"]))
+    d.debt = _latest(_row(bal, ["Total Debt"]))
+    pct = _num(info.get("heldPercentInsiders"))
+    d.promoter_holding_pct = None if pct is None else round(pct * 100, 2)
+    d.sources.append(f"https://finance.yahoo.com/quote/{sym}")
+    d.sources.append(f"https://www.screener.in/company/{sym.split('.')[0]}/consolidated/")
+    notes.append(f"Yahoo Finance ticker {sym}; statements in INR, converted to Rs. crore.")
+
+
+def run_company(req: CompanyRequest, client=None) -> CompanyResult:
+    res = CompanyResult(request=req)
+    d = CompanyOnePager(company_name=req.name, confidence="Low")
+    notes: List[str] = []
+    try:
+        sym = None
+        try:
+            sym = _resolve_ticker(req)
+        except Exception as e:  # yfinance missing / network
+            notes.append(f"Ticker lookup failed: {e}")
+        if sym:
+            try:
+                _listed(sym, d, notes)
+                d.confidence = "Medium"
+            except Exception as e:
+                d.data_gaps.append(f"Yahoo Finance fetch failed for {sym}: {e}")
+        else:
+            d.listed_status = "Unlisted / not found on NSE-BSE"
+            d.data_gaps.append(
+                "No NSE/BSE listing found, so no free structured financials. Look up: "
+                f"Tofler https://www.tofler.in/search?q={quote_plus(req.name)} | "
+                f"Zauba https://www.zaubacorp.com/companysearchresults/{quote_plus(req.name)} | "
+                f"MCA https://www.mca.gov.in (CIN, directors, charges). If listed, retry with the ticker in the Hint column (e.g. XYZ.NS)."
+            )
+
+        lt, st, rsrc = _ratings(d.company_name)
+        d.long_term_rating, d.short_term_rating = lt, st
+        d.sources += rsrc
+        if not lt.rating:
+            d.data_gaps.append("No credit rating found in search snippets - check CRISIL/ICRA/CARE sites directly.")
+        else:
+            d.data_gaps.append("Ratings come from search snippets and may be stale or mismatched - verify on the agency site.")
+
+        d.recent_news = [
+            f"{r.get('date','')[:10]} {r.get('title','')} ({r.get('source','')})".strip()
+            for r in _search(f'"{d.company_name}"', 5, news=True)
+        ]
+        flag_re = re.compile(r"downgrad|default|insolven|nclt|fraud|raid|qualif|resign|penalt|probe", re.I)
+        d.red_flags = [n for n in d.recent_news if flag_re.search(n)]
+
+        for key, q in (("factories", f'"{d.company_name}" manufacturing plants locations'),
+                       ("group_companies", f'"{d.company_name}" subsidiaries group companies')):
+            hits = _search(q, 3)
+            setattr(d, key, [f"(search lead, verify) {h.get('title','')} - {h.get('href','')}" for h in hits])
+        if not d.about:
+            hits = _search(f'"{d.company_name}" company profile India', 3)
+            if hits:
+                d.about = f"(search snippet) {hits[0].get('body','')}"
+        if req.meetup_person:
+            d.meetup_person = _person(req.meetup_person, d.company_name)
+            if not d.meetup_person.linkedin_url:
+                d.data_gaps.append("LinkedIn profile not found via public search; search manually.")
+            d.data_gaps.append("LinkedIn career history cannot be read without logging in; open the profile.")
+        d.data_gaps += ["Products & services, factories, group companies: only search leads (no structured free source)."]
+        res.data, res.notes = d, "\n".join(notes)
+    except Exception as e:
+        res.error = str(e)
+    return res
