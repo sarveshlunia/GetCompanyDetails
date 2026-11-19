@@ -24,6 +24,7 @@ class ScreenerData:
     rating_links: List[str] = field(default_factory=list)
     annual_reports: List[str] = field(default_factory=list)
     cash: Optional[tuple] = None
+    basis: str = "Consolidated"
     warehouse_id: Optional[str] = None
     name: Optional[str] = None
     about: Optional[str] = None
@@ -63,6 +64,9 @@ def _table(soup, section_id) -> Dict[str, Dict[str, float]]:
 def parse(html: str, url: str = "") -> ScreenerData:
     soup = BeautifulSoup(html, "html.parser")
     s = ScreenerData(url=url)
+    sec = soup.find(id="profit-loss")
+    if sec and re.search(r"Standalone Figures", sec.get_text(" ")):
+        s.basis = "Standalone"   # company has no consolidated accounts; Screener shows standalone
     pl, bs = _table(soup, "profit-loss"), _table(soup, "balance-sheet")
     s.sales = pl.get("Sales", pl.get("Revenue", {}))
     s.profit = pl.get("Net Profit", {})
@@ -141,19 +145,28 @@ def _cash(wid: str) -> Optional[tuple]:
     return (max(vals), vals[max(vals)]) if vals else None
 
 
-def search(name: str) -> Optional[tuple]:
-    """Screener's own company search (public JSON). Returns (symbol_or_bse_code, company_name) of the best hit."""
+def search_all(name: str, limit: int = 6) -> List[tuple]:
+    """Screener's public company search. Returns [(code, company_name), ...]; tries shorter variants for typos."""
     import json
     from urllib.parse import quote_plus
-    raw = get(f"https://www.screener.in/api/company/search/?q={quote_plus(name)}&v=3&fts=1", accept_json=True)
-    if not raw:
-        return None
-    try:
-        hits = json.loads(raw)
-    except ValueError:
-        return None
-    for h in hits:
-        m = re.search(r"/company/([^/]+)/", h.get("url", ""))
-        if m:
-            return m.group(1), h.get("name", "")
-    return None
+    words = re.sub(r"\b(limited|ltd|pvt|private)\b\.?", "", name, flags=re.I).split()
+    variants = [name] + ([" ".join(words[:2])] if len(words) > 2 else []) + ([words[0]] if len(words) > 1 else [])
+    out: List[tuple] = []
+    for q in dict.fromkeys(v for v in variants if v.strip()):
+        raw = get(f"https://www.screener.in/api/company/search/?q={quote_plus(q)}&v=3&fts=1", accept_json=True)
+        try:
+            hits = json.loads(raw) if raw else []
+        except ValueError:
+            hits = []
+        for h in hits:
+            m = re.search(r"/company/([^/]+)/", h.get("url", ""))
+            if m and (m.group(1), h.get("name", "")) not in out:
+                out.append((m.group(1), h.get("name", "")))
+        if out:
+            break
+    return out[:limit]
+
+
+def search(name: str) -> Optional[tuple]:
+    hits = search_all(name)
+    return hits[0] if hits else None

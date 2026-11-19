@@ -20,7 +20,7 @@ from .fin_extract import Cand
 from .schema import Amount, CompanyOnePager, MeetupPerson, Person, Rating, YearFigure
 
 CR = 1e7  # 1 crore = 10 million
-READ_PDFS = True  # read annual-report PDFs for numbers (slower, more complete); the UI toggles this
+READ_PDFS = False  # also read annual-report PDFs as a cross-check (slow, less accurate); the UI toggles this
 
 
 @dataclass
@@ -274,10 +274,10 @@ def _apply_screener(sc, d: CompanyOnePager, cands: List[Cand]) -> None:
     """Screener consolidated figures (already Rs. crore) become candidates; priority is decided later."""
     for field, m in (("revenue", sc.sales), ("pat", sc.profit)):
         for y in sorted(m, reverse=True)[:3]:
-            cands.append(Cand(field, y, m[y], "Screener", sc.url, "Consolidated", 0, "Screener consolidated table", "api"))
+            cands.append(Cand(field, y, m[y], "Screener", sc.url, sc.basis, 0, f"Screener {sc.basis.lower()} table", "api"))
     for field, val in (("net_worth", sc.net_worth), ("debt", sc.borrowings), ("non_current_investments", sc.investments), ("cash", sc.cash)):
         if val:
-            cands.append(Cand(field, val[0], val[1], "Screener", sc.url, "Consolidated", 0, "Screener consolidated balance sheet", "api"))
+            cands.append(Cand(field, val[0], val[1], "Screener", sc.url, sc.basis, 0, f"Screener {sc.basis.lower()} balance sheet", "api"))
     d.sources.append(sc.url)
 
 
@@ -364,7 +364,13 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
         if req.hint and re.fullmatch(r"[A-Za-z0-9&\-]+\.(NS|BO)", req.hint.strip()):
             sym = req.hint.strip().upper()
         else:
-            sc_hit = _try(d, "Screener search", screener.search, req.name)
+            hits = _try(d, "Screener search", screener.search_all, req.name, default=[]) or []
+            if not hits:  # search engine fallback: find a screener.in/company/<CODE>/ link
+                for r in _search(f'"{req.name}" site:screener.in', 5):
+                    m = re.search(r"screener\.in/company/([A-Za-z0-9&\-]+)/", r.get("href", ""))
+                    if m:
+                        hits.append((m.group(1), re.sub(r"\s*share price.*$", "", r.get("title", ""), flags=re.I)))
+            sc_hit = max(hits, key=lambda h: similar(req.name, h[1])) if hits else None
             if sc_hit:
                 code, matched = sc_hit
                 if similar(req.name, matched) < 0.5:
@@ -452,7 +458,9 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
         # 3b. Numbers, priority 1: company's own pages and annual reports (then Screener already collected, then others)
         from . import fin_extract, numbers
         nfields = ["revenue", "pat", "net_worth", "debt", "cash", "non_current_investments", "current_investments"]
-        if site:
+        have = {c.field for c in cands if c.source == "Screener"}
+        need = [f for f in nfields if f not in have]   # what Screener could not give
+        if site and need:
             for url, html in site.fin_html:
                 got = _try(d, "Website financial page", fin_extract.from_html, html, "Company website", url, default=[])
                 cands += got
@@ -460,18 +468,20 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
             if not site.fin_html:
                 attempts.append((nfields, "Company website", site.page_urls.get("investor") or site.url, False, "no investor/financial-results page found"))
         pdfs = list(dict.fromkeys((site.annual_reports if site else []) + ((sc.annual_reports if sc else []) if sym else [])))
-        if READ_PDFS and pdfs:
+        if READ_PDFS and pdfs and (need or have):
             for url in pdfs[:2]:
                 got = _try(d, "Annual report PDF", fin_extract.from_pdf, url, default=[])
                 cands += got
                 attempts.append((nfields, "Annual report PDF", url, bool(got), f"{len(got)} numbers read" if got else "no readable numbers (scanned/odd layout/too big)"))
         elif pdfs:
-            attempts.append((nfields, "Annual report PDF", pdfs[0], False, "skipped (PDF reading switched off)"))
+            attempts.append((nfields, "Annual report PDF", pdfs[0], False, "not read (PDF cross-check is off; Screener is the primary source)"))
         else:
             attempts.append((nfields, "Annual report PDF", "", False, "no annual-report link found on the website or Screener"))
-        if not any(c.field == "revenue" for c in cands):  # nothing structured: try quoted figures in search results
+        if not any(c.field == "revenue" for c in cands):  # nothing structured at all: try quoted figures in search results
             for r in _search(f'"{d.company_name}" revenue net profit crore FY', 8):
                 cands += fin_extract.from_snippet(f"{r.get('title','')}. {r.get('body','')}", r.get("href", ""))
+        # Screener is the authority: other sources only fill fields Screener lacks (or act as a cross-check when PDFs are on)
+        cands = [c for c in cands if c.source == "Screener" or c.field in need or READ_PDFS]
         numbers.resolve(cands, d)
         if cands and d.revenue and d.confidence != "High":
             d.confidence = "High" if any(y.source in ("Company website", "Annual report PDF", "Screener") for y in d.revenue) else "Medium"

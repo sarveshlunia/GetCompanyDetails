@@ -17,7 +17,7 @@ from typing import Dict, List, Optional
 from .fin_extract import Cand, POINT_FIELDS
 from .schema import Amount, CompanyOnePager, YearFigure
 
-SOURCE_RANK = {"Company website": 1, "Annual report PDF": 1, "Screener": 2, "Yahoo Finance": 3, "Search snippet": 4}
+SOURCE_RANK = {"Screener": 1, "Company website": 2, "Annual report PDF": 2, "Yahoo Finance": 3, "Search snippet": 4}
 FIELD_ATTR = {"revenue": "revenue", "pat": "pat", "net_worth": "net_worth", "debt": "debt", "cash": "cash_and_equivalents",
               "non_current_investments": "non_current_investments", "current_investments": "current_investments"}
 LABEL = {"revenue": "Revenue", "pat": "PAT", "net_worth": "Net worth", "debt": "Debt", "cash": "Cash & equivalents",
@@ -43,25 +43,21 @@ def _basis(c: Cand) -> str:
 
 
 def _decide(field: str, other: Optional[Cand], scr: Optional[Cand], d: CompanyOnePager):
-    """Return (chosen candidate, verify text)."""
+    """Screener is the authority. A company-filing/other figure is shown only where Screener has none."""
     if other is None and scr is None:
         return None, None
-    if other is None:
-        return scr, "Screener only (no company-statement figure found)"
     if scr is None:
-        note = "not cross-checked (Screener has no figure for this)" if other.kind == "statement" else "NOT verified (loose table, no Screener figure)"
-        return other, note
+        kind = "read from the company's own pages/PDF" if other.source in ("Company website", "Annual report PDF") else other.source
+        return other, f"NOT verified: Screener has no figure; {kind} (check it)"
+    if other is None:
+        return scr, f"Screener ({scr.basis.lower() if scr.basis != 'Unspecified' else 'basis not stated'})"
     diff = abs(other.value_cr - scr.value_cr) / max(abs(scr.value_cr), 1e-9)
     ok = diff <= TOL[field] or abs(other.value_cr - scr.value_cr) < 1.0
-    d.verification.append({"metric": LABEL[field], "FY": other.fy, "statement / company": other.value_cr, "company source": other.source,
+    d.verification.append({"metric": LABEL[field], "FY": other.fy, "other source": other.source, "other value": other.value_cr,
                            "Screener": scr.value_cr, "difference %": round(diff * 100, 1),
-                           "status": "MATCH" if ok else "MISMATCH", "shown": "company" if ok else "Screener",
-                           "evidence": other.evidence})
-    if ok:
-        return other, f"✔ matches Screener ({diff:.1%} apart)"
-    d.data_gaps.append(f"MISMATCH {LABEL[field]} {other.fy or ''}: {other.source} reads Rs. {other.value_cr:,.2f} Cr but Screener has "
-                       f"Rs. {scr.value_cr:,.2f} Cr ({diff:.0%} apart) - showing Screener; check the filing.")
-    return scr, f"⚠ {other.source} read Rs. {other.value_cr:,.2f} Cr ({diff:.0%} apart) - Screener shown"
+                           "status": "AGREES" if ok else "DIFFERS", "shown": "Screener", "evidence": other.evidence})
+    return scr, ("Screener ✔ company filing agrees" if ok else
+                 f"Screener (⚠ {other.source} read Rs. {other.value_cr:,.2f} Cr, {diff:.0%} apart - see cross-check table)")
 
 
 def _best(items: List[Cand]) -> Optional[Cand]:

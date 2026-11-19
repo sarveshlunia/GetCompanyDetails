@@ -40,12 +40,12 @@ web request returned; send it to the developer when fields come back empty.
 - Every value shows a clickable source link; each company has a "Search it yourself" list of ready-made links
   (Zauba, Tofler, MCA, NSE/BSE, rating agencies, LinkedIn, site-specific searches).
 
-## How numbers are taken (balance sheet first, Screener cross-check)
-Net worth = equity share capital + other equity; debt = sum of borrowing lines (non-current + current + current maturities,
-lease liabilities excluded); investments split non-current vs current by balance-sheet section; cash = current assets;
-revenue and PAT from the Statement of Profit & Loss - all read from the consolidated statements in the annual report /
-website. Each is then compared with Screener: agree -> statement figure shown with a tick; disagree -> Screener shown,
-flagged, and both values appear in the "Cross-check vs Screener" table with the raw line read.
+## How numbers are taken (Screener first)
+Revenue, PAT, net worth (equity capital + reserves), debt (borrowings), investments and cash come from **Screener's
+consolidated tables** (standalone only if the company has no consolidated accounts - labelled). Reading numbers out of
+annual-report PDFs proved unreliable, so PDFs are **off by default**. Company pages/PDFs/Yahoo only fill fields Screener
+does not have (mainly current investments, and everything for unlisted companies) and are marked "NOT verified".
+Tick "Also read annual-report PDFs" to get a cross-check table (company filing vs Screener) - Screener's figure is still the one shown.
 
 ## Blunt limits
 - Zauba is bot-protected and Screener/company sites change HTML; scrapers are best-effort and written against

@@ -158,7 +158,7 @@ typed = st.text_area(
     "Type company names (one per line). Optional: `Company | Meetup person | Ticker e.g. XYZ.NS or website`",
     height=140, placeholder="Tata Motors Limited\nSupreme Industries | Ramesh Kumar | Mumbai")
 up = st.file_uploader("...or upload CSV / XLSX / TXT (columns: Company, Meetup Person, Hint)", type=["csv", "xlsx", "txt"])
-read_pdfs = st.checkbox("Read annual-report PDFs for numbers (slower, more complete)", value=True)
+read_pdfs = st.checkbox("Also read annual-report PDFs as a cross-check (slow, less accurate - Screener is always the primary source)", value=False)
 research.READ_PDFS = read_pdfs
 workers = st.slider("Parallel companies", 1, 5, 2, help="Lower = fewer blocked requests.")
 
@@ -205,11 +205,11 @@ if ok:
                 if d.field_urls.get("annual_report"):
                     st.markdown(f"- [Annual report (found)]({d.field_urls['annual_report']})")
             if d.verification:
-                with st.expander(f"Cross-check vs Screener ({len(d.verification)} comparisons)", expanded=any(v["status"] == "MISMATCH" for v in d.verification)):
+                with st.expander(f"Cross-check vs company filings ({len(d.verification)} comparisons)", expanded=any(v["status"] == "DIFFERS" for v in d.verification)):
                     vdf = pd.DataFrame(d.verification)
                     st.dataframe(vdf, hide_index=True, column_config={"evidence": st.column_config.TextColumn("raw line read", width="large")})
-                    st.caption("MATCH = company statement and Screener agree, statement figure shown. MISMATCH = Screener figure shown; "
-                               "open the annual report page in the evidence to see which is right.")
+                    st.caption("Screener's figure is always the one shown. AGREES = the company filing read matches; DIFFERS = check the filing "
+                               "(PDF readers can misread - the raw line is shown).")
             if d.trail:
                 with st.expander(f"How each field was searched ({len(d.trail)} attempts) - source, link, result", expanded=False):
                     df = pd.DataFrame(d.trail)[["field", "source", "url", "result"]].sort_values(["field", "source"])
