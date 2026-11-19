@@ -43,10 +43,13 @@ def inr_to_cr(text: str) -> Optional[float]:
     """'₹ 5,00,00,000' -> 5.0 ; 'Rs. 10 Crore' -> 10.0 ; '25 Lakh' -> 0.25"""
     if not text:
         return None
-    m = re.search(r"[\d,]+(?:\.\d+)?", text)
+    m = re.search(r"\d[\d,]*(?:\.\d+)?", text)
     if not m:
         return None
-    v = float(m.group(0).replace(",", ""))
+    try:
+        v = float(m.group(0).replace(",", ""))
+    except ValueError:
+        return None
     t = text.lower()
     if "crore" in t or re.search(r"\bcr\b", t):
         return round(v, 2)

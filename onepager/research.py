@@ -120,8 +120,8 @@ def similar(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, x, y).ratio()
 
 
-_AUTH_RE = re.compile(r"authori[sz]ed\s+(?:share\s+)?capital[^\d]{0,40}((?:rs\.?|inr|\u20b9)?\s*[\d,\.]+\s*(?:crore|cr|lakh|lac)?)", re.I)
-_PAID_RE = re.compile(r"paid[\s-]*up\s+(?:share\s+)?capital[^\d]{0,40}((?:rs\.?|inr|\u20b9)?\s*[\d,\.]+\s*(?:crore|cr|lakh|lac)?)", re.I)
+_AUTH_RE = re.compile(r"authori[sz]ed\s+(?:share\s+)?capital[^\d]{0,40}((?:rs\.?|inr|\u20b9)?\s*\d[\d,\.]*\s*(?:crore|cr|lakh|lac)?)", re.I)
+_PAID_RE = re.compile(r"paid[\s-]*up\s+(?:share\s+)?capital[^\d]{0,40}((?:rs\.?|inr|\u20b9)?\s*\d[\d,\.]*\s*(?:crore|cr|lakh|lac)?)", re.I)
 _DIRS_RE = re.compile(r"directors?\s+(?:of\s+[^.]{0,80}?\s+)?(?:are|is|include)\s+([A-Z][^.]{5,200})\.", re.I)
 
 
@@ -269,6 +269,19 @@ def _apply_screener(sc, d: CompanyOnePager) -> None:
                             if getattr(d, k)})
 
 
+def _try(d: CompanyOnePager, label: str, fn, *args, default=None):
+    """Run one source; on any error log it and carry on with the other sources."""
+    import traceback
+    from . import http
+    try:
+        return fn(*args)
+    except Exception as e:
+        tb = traceback.extract_tb(e.__traceback__)[-1]
+        http.log(f"ERROR {label}: {type(e).__name__}: {e} (at {tb.filename.split('/')[-1]}:{tb.lineno})")
+        d.data_gaps.append(f"{label} failed ({type(e).__name__}) - see Debug log; fill manually.")
+        return default
+
+
 def run_company(req: CompanyRequest, client=None) -> CompanyResult:
     """Order follows the analyst's manual process:
     Zauba (capital, directors) -> company website (about, address, products, factories) ->
@@ -283,7 +296,7 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
     notes: List[str] = []
     try:
         # 1. Zauba: authorised + paid-up capital, CIN, listing status, directors
-        z = zauba.fetch(req.name)
+        z = _try(d, "Zauba", zauba.fetch, req.name)
         if z:
             d.cin = z.cin
             d.authorised_capital = Amount(value_cr=z.authorised_cr, basis="Zauba Corp", source_url=z.url)
@@ -294,13 +307,13 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
             d.sources.append(z.url)
             d.field_sources.update({"authorised_capital": "Zauba", "paid_up_capital": "Zauba", "directors": "Zauba"})
         else:
-            auth, paid, src = capital_from_snippets(req.name)
+            auth, paid, src = _try(d, "Capital snippets", capital_from_snippets, req.name, default=(None, None, None))
             if auth is not None or paid is not None:
                 d.authorised_capital = Amount(value_cr=auth, basis="Search snippet - verify", source_url=src)
                 d.paid_up_capital = Amount(value_cr=paid, basis="Search snippet - verify", source_url=src)
                 d.field_sources.update({"authorised_capital": "Search snippet", "paid_up_capital": "Search snippet"})
                 d.sources.append(src or "")
-            d.directors = directors_from_snippets(req.name)
+            d.directors = _try(d, "Director snippets", directors_from_snippets, req.name, default=[])
             if d.directors:
                 d.field_sources["directors"] = "Search snippet"
             d.data_gaps.append("Zauba blocked/not found - capital and directors came from search snippets (verify) or are missing: "
@@ -311,7 +324,7 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
         if req.hint and re.fullmatch(r"[A-Za-z0-9&\-]+\.(NS|BO)", req.hint.strip()):
             sym = req.hint.strip().upper()
         else:
-            sc_hit = screener.search(req.name)
+            sc_hit = _try(d, "Screener search", screener.search, req.name)
             if sc_hit:
                 code, matched = sc_hit
                 if similar(req.name, matched) < 0.5:
@@ -324,18 +337,18 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 notes.append(f"Ticker lookup failed: {e}")
         if sym:
             try:
-                _listed(sym, d, notes)
-                d.confidence = "Medium"
+                _try(d, "Yahoo Finance", _listed, sym, d, notes)
+                d.confidence = "Medium" if d.revenue else d.confidence
             except Exception as e:
                 d.data_gaps.append(f"Yahoo Finance fetch failed for {sym}: {e}")
-            sc = screener.fetch(sym.split(".")[0])
+            sc = _try(d, "Screener page", screener.fetch, sym.split(".")[0])
             if sc:
                 if sc.about and not d.about:
                     d.about = sc.about
                     d.field_sources["about"] = "Screener"
                 if sc.website and not d.website:
                     d.website = sc.website
-                _apply_screener(sc, d)
+                _try(d, "Screener parse", _apply_screener, sc, d)
                 d.confidence = "High" if d.revenue else d.confidence
                 if sc.rating_links:
                     d.sources += sc.rating_links
@@ -353,7 +366,7 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
             site_url = req.hint if req.hint.startswith("http") else f"https://{req.hint}/"
         if not site_url:
             site_url = website.pick_site(_search(f'"{req.name}" official website', 8))
-        site = website.fetch(site_url) if site_url else None
+        site = _try(d, "Company website", website.fetch, site_url) if site_url else None
         if site:
             d.website = site.url
             d.sources += site.pages[:5]
@@ -379,7 +392,7 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 d.data_gaps.append(f"{label}: not found on website - use ChatGPT prompt below.")
 
         # 4. Ratings (search snippets) - verify on agency site
-        lt, st, rsrc = _ratings(d.company_name)
+        lt, st, rsrc = _try(d, "Ratings", _ratings, d.company_name, default=(Rating(), Rating(), []))
         d.long_term_rating, d.short_term_rating = lt, st
         d.sources += rsrc
         d.data_gaps.append("Ratings parsed from search snippets - verify on CRISIL/ICRA/CARE/Screener." if lt.rating
@@ -393,7 +406,7 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
 
         # 6. Meetup person: LinkedIn link + headline; history needs manual/ChatGPT
         if req.meetup_person:
-            d.meetup_person = _person(req.meetup_person, d.company_name)
+            d.meetup_person = _try(d, "LinkedIn search", _person, req.meetup_person, d.company_name, default=MeetupPerson(name=req.meetup_person))
             if not d.meetup_person.linkedin_url:
                 d.data_gaps.append("LinkedIn profile not found via public search; search manually.")
             d.data_gaps.append("LinkedIn work history (company, from-to years) needs a logged-in view: open the profile or use the ChatGPT prompt.")

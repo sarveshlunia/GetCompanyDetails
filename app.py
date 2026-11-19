@@ -95,10 +95,13 @@ def _amt(text, old: Amount) -> Amount:
 def _years(text, old):
     out = []
     for ln in _lines(text):
-        m = re.match(r"(FY\s?\d{4})\s*[:=-]\s*([\d,\.]+)", ln, re.I)
+        m = re.match(r"(FY\s?\d{4})\s*[:=-]\s*(\d[\d,\.]*)", ln, re.I)
         if m:
-            out.append(YearFigure(fiscal_year=m.group(1).upper().replace(" ", ""), value_cr=float(m.group(2).replace(",", "")),
-                                  basis="Entered manually"))
+            try:
+                out.append(YearFigure(fiscal_year=m.group(1).upper().replace(" ", ""),
+                                      value_cr=float(m.group(2).replace(",", "").rstrip(".")), basis="Entered manually"))
+            except ValueError:
+                pass
     return out or old
 
 
