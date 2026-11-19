@@ -96,7 +96,7 @@ def _search(query: str, n: int = 6, news: bool = False) -> List[dict]:
 
 _RATING_RE = re.compile(
     r"(CRISIL|ICRA|CARE|India Ratings|IND|Acuite|ACUITE|Brickwork|BWR|Infomerics)"
-    r"[^.\n]{0,60}?\b((?:AAA|AA\+|AA-|AA|A\+|A-|BBB\+|BBB-|BBB|BB\+|BB-|BB|B\+|B-|D)"
+    r"[^.\n]{0,60}?\b((?:AAA|AA\+|AA-|AA|A\+|A-|A(?=\s*[(/]|\s*(?:Stable|Positive|Negative))|BBB\+|BBB-|BBB|BB\+|BB-|BB|B\+|B-|D)"
     r"(?:\s*\(?\s*(?:Stable|Positive|Negative|CE)\s*\)?)?)(?![\w+])"
 )
 _SHORT_RE = re.compile(r"\b(A[1-4]\+?)(?![\w+])")
