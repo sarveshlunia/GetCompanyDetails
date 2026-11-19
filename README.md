@@ -28,6 +28,11 @@ Yahoo ticker (`XYZ.NS` / `XYZ.BO`) in the hint.
 Anything the free sources miss is listed under "Gaps" with a ready-to-paste ChatGPT prompt per company
 (your "chart GBD" step), so you only do the manual part for what's missing.
 
+## Screen view
+Results show on screen per company (tabs), each value tagged with its source; red "Not found" marks gaps. Use the
+"Fill / correct" box to type missing values - they flow into the Word/Excel download. The "Debug log" shows what every
+web request returned; send it to the developer when fields come back empty.
+
 ## Blunt limits
 - Zauba is bot-protected and Screener/company sites change HTML; scrapers are best-effort and written against
   fixtures, not verified live. If one is blocked you get a gap + manual link, not a crash.

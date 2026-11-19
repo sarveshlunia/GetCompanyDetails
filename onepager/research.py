@@ -84,14 +84,78 @@ def _latest(series: dict, period_note: str = "") -> Amount:
 
 # ---------------------------------------------------------------- web search
 def _search(query: str, n: int = 6, news: bool = False) -> List[dict]:
+    """DuckDuckGo with retries and backend fallback - it fails/rate-limits often."""
+    import time
+    from . import http
     try:
         from ddgs import DDGS
-
-        with DDGS() as d:
-            res = d.news(query, region="in-en", max_results=n) if news else d.text(query, region="in-en", max_results=n)
-            return list(res or [])
     except Exception:
+        http.log("FAIL ddgs not installed")
         return []
+    for attempt, backend in enumerate(("auto", "duckduckgo", "bing")):
+        try:
+            with DDGS() as d:
+                res = (d.news(query, region="in-en", max_results=n) if news
+                       else d.text(query, region="in-en", max_results=n, backend=backend))
+            res = list(res or [])
+            if res:
+                http.log(f"OK   search[{backend}] {query[:60]} -> {len(res)} results")
+                return res
+        except Exception as e:
+            http.log(f"FAIL search[{backend}] {type(e).__name__}: {str(e)[:80]}")
+            time.sleep(0.5 * (attempt + 1))
+            if "ConnectError" in type(e).__name__ or "Timeout" in str(e)[:40] and attempt >= 1:
+                break
+    return []
+
+
+def _name_core(n: str) -> str:
+    n = re.sub(r"\b(limited|ltd|pvt|private|public|co|company|corporation|corp|inc|llp|india|industries|industry|enterprises|group|holdings)\b\.?", " ", n.lower())
+    return re.sub(r"[^a-z0-9 ]", " ", n).split()
+
+
+def similar(a: str, b: str) -> float:
+    import difflib
+    x, y = " ".join(_name_core(a)) or a.lower(), " ".join(_name_core(b)) or b.lower()
+    return difflib.SequenceMatcher(None, x, y).ratio()
+
+
+_AUTH_RE = re.compile(r"authori[sz]ed\s+(?:share\s+)?capital[^\d]{0,40}((?:rs\.?|inr|\u20b9)?\s*[\d,\.]+\s*(?:crore|cr|lakh|lac)?)", re.I)
+_PAID_RE = re.compile(r"paid[\s-]*up\s+(?:share\s+)?capital[^\d]{0,40}((?:rs\.?|inr|\u20b9)?\s*[\d,\.]+\s*(?:crore|cr|lakh|lac)?)", re.I)
+_DIRS_RE = re.compile(r"directors?\s+(?:of\s+[^.]{0,80}?\s+)?(?:are|is|include)\s+([A-Z][^.]{5,200})\.", re.I)
+
+
+def capital_from_snippets(name: str):
+    """Fallback when Zauba blocks us: Zauba/Tofler/Falcon snippets usually quote both capitals in plain text."""
+    from .http import inr_to_cr
+    auth = paid = src = None
+    first = (_name_core(name) or [""])[0]
+    for r in _search(f'"{name}" authorised capital paid up capital', 8):
+        text = f"{r.get('title','')} {r.get('body','')}"
+        if first and first not in text.lower():
+            continue
+        a, p = _AUTH_RE.search(text), _PAID_RE.search(text)
+        if a and auth is None:
+            auth, src = inr_to_cr(a.group(1)), r.get("href")
+        if p and paid is None:
+            paid, src = inr_to_cr(p.group(1)), src or r.get("href")
+        if auth is not None and paid is not None:
+            break
+    return auth, paid, src
+
+
+def directors_from_snippets(name: str) -> List[Person]:
+    first = (_name_core(name) or [""])[0]
+    for r in _search(f'"{name}" directors list DIN', 6):
+        text = f"{r.get('title','')} {r.get('body','')}"
+        if first and first not in text.lower():
+            continue
+        m = _DIRS_RE.search(text)
+        if m:
+            names = [x.strip() for x in re.split(r",|\band\b", m.group(1)) if 2 <= len(x.split()) <= 4]
+            if names:
+                return [Person(name=n) for n in names[:10]]
+    return []
 
 
 _RATING_RE = re.compile(
@@ -104,7 +168,9 @@ _SHORT_RE = re.compile(r"\b(A[1-4]\+?)(?![\w+])")
 
 def _ratings(name: str):
     lt, st, sources = Rating(), Rating(), []
-    for r in _search(f'"{name}" credit rating rationale CRISIL ICRA CARE long term short term', 8):
+    results = _search(f'"{name}" credit rating rationale CRISIL ICRA CARE long term short term', 8)
+    results += _search(f'"{name}" rating site:crisilratings.com OR site:icra.in OR site:careratings.com OR site:indiaratings.co.in', 6)
+    for r in results:
         text = f"{r.get('title','')} {r.get('body','')}"
         url = r.get("href")
         if not lt.rating and (m := _RATING_RE.search(text)):
@@ -210,6 +276,8 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
     from . import screener, website, zauba
     from .prompts import gap_prompt
 
+    from . import http as _h
+    _h.drain()
     res = CompanyResult(request=req)
     d = CompanyOnePager(company_name=req.name, confidence="Low")
     notes: List[str] = []
@@ -226,16 +294,34 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
             d.sources.append(z.url)
             d.field_sources.update({"authorised_capital": "Zauba", "paid_up_capital": "Zauba", "directors": "Zauba"})
         else:
-            d.data_gaps.append(
-                "Zauba Corp unreachable/blocked or company not found: get authorised & paid-up capital and directors manually: "
-                f"https://www.zaubacorp.com/companysearchresults/{quote_plus(req.name)}")
+            auth, paid, src = capital_from_snippets(req.name)
+            if auth is not None or paid is not None:
+                d.authorised_capital = Amount(value_cr=auth, basis="Search snippet - verify", source_url=src)
+                d.paid_up_capital = Amount(value_cr=paid, basis="Search snippet - verify", source_url=src)
+                d.field_sources.update({"authorised_capital": "Search snippet", "paid_up_capital": "Search snippet"})
+                d.sources.append(src or "")
+            d.directors = directors_from_snippets(req.name)
+            if d.directors:
+                d.field_sources["directors"] = "Search snippet"
+            d.data_gaps.append("Zauba blocked/not found - capital and directors came from search snippets (verify) or are missing: "
+                               f"https://www.zaubacorp.com/companysearchresults/{quote_plus(req.name)}")
 
         # 2. Listed? Yahoo (profile + cash + fallback financials), then Screener (consolidated) overrides
-        sym = None
-        try:
-            sym = _resolve_ticker(req)
-        except Exception as e:
-            notes.append(f"Ticker lookup failed: {e}")
+        sym, sc_hit = None, None
+        if req.hint and re.fullmatch(r"[A-Za-z0-9&\-]+\.(NS|BO)", req.hint.strip()):
+            sym = req.hint.strip().upper()
+        else:
+            sc_hit = screener.search(req.name)
+            if sc_hit:
+                code, matched = sc_hit
+                if similar(req.name, matched) < 0.5:
+                    d.data_gaps.append(f"CHECK NAME: you typed '{req.name}' but the closest listed match is '{matched}' - ignore listed data if it is a different company.")
+                sym = code + (".BO" if code.isdigit() else ".NS")
+        if not sym:
+            try:
+                sym = _resolve_ticker(req)
+            except Exception as e:
+                notes.append(f"Ticker lookup failed: {e}")
         if sym:
             try:
                 _listed(sym, d, notes)
@@ -244,6 +330,11 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 d.data_gaps.append(f"Yahoo Finance fetch failed for {sym}: {e}")
             sc = screener.fetch(sym.split(".")[0])
             if sc:
+                if sc.about and not d.about:
+                    d.about = sc.about
+                    d.field_sources["about"] = "Screener"
+                if sc.website and not d.website:
+                    d.website = sc.website
                 _apply_screener(sc, d)
                 d.confidence = "High" if d.revenue else d.confidence
                 if sc.rating_links:
@@ -275,6 +366,13 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 d.data_gaps.append("Directors: not on Zauba; check the website's Board/Leadership page, else ChatGPT prompt below.")
         else:
             d.data_gaps.append(f"Company website {'not reachable' if site_url else 'not found'}: about/address/products/factories need manual entry.")
+        if not d.about:
+            for r in _search(f'"{d.company_name}" company profile India what does it do', 5):
+                host = r.get("href", "")
+                if not any(b in host for b in ("linkedin.", "zaubacorp.", "tofler.", "justdial.", "indiamart.")) and len(r.get("body", "")) > 60:
+                    d.about = r["body"] + "  (search snippet - verify)"
+                    d.field_sources["about"] = "Search snippet"
+                    break
         for attr, label in (("about", "About"), ("corporate_address", "Corporate address"),
                             ("products_and_services", "Products & services"), ("factories", "Factories")):
             if not getattr(d, attr):
@@ -303,6 +401,8 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
         d.group_companies = d.group_companies or []
         d.data_gaps.append("Group companies: no structured free source.")
         d.chatgpt_prompt = gap_prompt(d, req.meetup_person or "")
+        from . import http
+        d.source_log = http.drain()
         res.data, res.notes = d, "\n".join(notes)
     except Exception as e:
         res.error = str(e)

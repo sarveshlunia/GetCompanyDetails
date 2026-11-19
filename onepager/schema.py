@@ -113,6 +113,7 @@ class CompanyOnePager(BaseModel):
     data_gaps: List[str] = Field(
         default_factory=list, description="Fields that could not be found or verified, and why."
     )
+    source_log: List[str] = Field(default_factory=list, description="What each web request returned (for debugging).")
     chatgpt_prompt: str = Field("", description="Copy-paste prompt for fields free sources could not fill.")
     confidence: str = Field(
         "Low", description="'High' if figures come from annual report/exchange filings, 'Medium' if from aggregators, 'Low' otherwise."

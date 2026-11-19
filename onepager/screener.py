@@ -22,6 +22,9 @@ class ScreenerData:
     borrowings: Optional[tuple] = None
     investments: Optional[tuple] = None
     rating_links: List[str] = field(default_factory=list)
+    name: Optional[str] = None
+    about: Optional[str] = None
+    website: Optional[str] = None
 
 
 def _f(s: str) -> Optional[float]:
@@ -72,6 +75,15 @@ def parse(html: str, url: str = "") -> ScreenerData:
     if common:
         y = common[-1]
         s.net_worth = (y, round(eq[y] + res[y], 2))
+    h1 = soup.find("h1")
+    s.name = h1.get_text(strip=True) if h1 else None
+    ab = soup.select_one(".company-profile .about, .about")
+    if ab:
+        s.about = re.sub(r"\s+", " ", ab.get_text(" ", strip=True))[:900] or None
+    for a in soup.select(".company-links a[href^=http]"):
+        if not re.search(r"bseindia|nseindia|screener", a["href"]):
+            s.website = a["href"]
+            break
     s.borrowings = last(bs.get("Borrowings", {}))
     s.investments = last(bs.get("Investments", {}))
     for h in soup.find_all(["h3", "h4", "h5"]):
@@ -90,3 +102,21 @@ def fetch(symbol: str) -> Optional[ScreenerData]:
     if not html or not re.search(r'id="profit-loss"', html):
         return None
     return parse(html, url)
+
+
+def search(name: str) -> Optional[tuple]:
+    """Screener's own company search (public JSON). Returns (symbol_or_bse_code, company_name) of the best hit."""
+    import json
+    from urllib.parse import quote_plus
+    raw = get(f"https://www.screener.in/api/company/search/?q={quote_plus(name)}&v=3&fts=1", accept_json=True)
+    if not raw:
+        return None
+    try:
+        hits = json.loads(raw)
+    except ValueError:
+        return None
+    for h in hits:
+        m = re.search(r"/company/([^/]+)/", h.get("url", ""))
+        if m:
+            return m.group(1), h.get("name", "")
+    return None

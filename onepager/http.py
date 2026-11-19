@@ -3,20 +3,39 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+import threading
+from typing import List, Optional
 
 import requests
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 
-def get(url: str, timeout: int = 15) -> Optional[str]:
+_tl = threading.local()
+
+
+def log(msg: str) -> None:
+    if not hasattr(_tl, "lines"):
+        _tl.lines = []
+    _tl.lines.append(msg)
+
+
+def drain() -> List[str]:
+    """Return and clear this thread's log (one company = one thread of work)."""
+    lines, _tl.lines = getattr(_tl, "lines", []), []
+    return lines
+
+
+def get(url: str, timeout: int = 15, accept_json: bool = False) -> Optional[str]:
     try:
-        r = requests.get(url, headers={"User-Agent": UA, "Accept-Language": "en-IN,en;q=0.9"}, timeout=timeout)
+        r = requests.get(url, headers={"User-Agent": UA, "Accept-Language": "en-IN,en;q=0.9",
+                                       **({"Accept": "application/json"} if accept_json else {})}, timeout=timeout)
         if r.status_code == 200 and r.text:
+            log(f"OK   200 {url}")
             return r.text
-    except requests.RequestException:
-        pass
+        log(f"FAIL {r.status_code} {url}" + (" (blocked by site?)" if r.status_code in (403, 429, 503) else ""))
+    except requests.RequestException as e:
+        log(f"FAIL {type(e).__name__} {url}")
     return None
 
 
