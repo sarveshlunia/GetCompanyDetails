@@ -36,16 +36,19 @@ web request returned; send it to the developer when fields come back empty.
 ## Deeper sources and links
 - Company website is crawled two levels deep (About, Investors, Board/Leadership, Subsidiaries, Plants, Annual report).
 - Wikipedia + Wikidata supply description, parent company and subsidiaries for notable companies.
-- Screener supplies annual-report and rating-document links.
+- Screener supplies annual-report and rating-document links, plus all financial numbers.
 - Every value shows a clickable source link; each company has a "Search it yourself" list of ready-made links
   (Zauba, Tofler, MCA, NSE/BSE, rating agencies, LinkedIn, site-specific searches).
 
-## How numbers are taken (Screener first)
-Revenue, PAT, net worth (equity capital + reserves), debt (borrowings), investments and cash come from **Screener's
-consolidated tables** (standalone only if the company has no consolidated accounts - labelled). Reading numbers out of
-annual-report PDFs proved unreliable, so PDFs are **off by default**. Company pages/PDFs/Yahoo only fill fields Screener
-does not have (mainly current investments, and everything for unlisted companies) and are marked "NOT verified".
-Tick "Also read annual-report PDFs" to get a cross-check table (company filing vs Screener) - Screener's figure is still the one shown.
+## Numbers: Screener only
+Every financial number (revenue, PAT, net worth, debt, investments, cash, market cap, ratios, cash flow, shareholding,
+promoter holding) comes from **Screener** only - consolidated, or standalone if that is all Screener has (labelled).
+It is shown on screen (ratios, P&L, balance sheet, cash flow, ratios, shareholding, Other Assets/Liabilities/Borrowings
+schedules, pros/cons) and exported to Excel ("Screener data (long)" sheet, ready for pivots/Power BI).
+No PDFs, Yahoo or search snippets are used for numbers. Unlisted companies have no Screener page, so their numbers are
+left blank (type them into "Fill / correct"). Authorised/paid-up capital are registry data and still come from Zauba.
+All non-numeric fields (about, address, directors, products, factories, group companies, ratings, news, person) are
+gathered from whichever source is relevant.
 
 ## Blunt limits
 - Zauba is bot-protected and Screener/company sites change HTML; scrapers are best-effort and written against

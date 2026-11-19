@@ -20,7 +20,6 @@ from .fin_extract import Cand
 from .schema import Amount, CompanyOnePager, MeetupPerson, Person, Rating, YearFigure
 
 CR = 1e7  # 1 crore = 10 million
-READ_PDFS = False  # also read annual-report PDFs as a cross-check (slow, less accurate); the UI toggles this
 
 
 @dataclass
@@ -238,7 +237,7 @@ def _yahoo_cands(t, url: str) -> List[Cand]:
     return out
 
 
-def _listed(sym: str, d: CompanyOnePager, notes: List[str], cands: Optional[List[Cand]] = None) -> None:
+def _listed(sym: str, d: CompanyOnePager, notes: List[str]) -> None:
     import yfinance as yf
 
     t = yf.Ticker(sym)
@@ -251,9 +250,6 @@ def _listed(sym: str, d: CompanyOnePager, notes: List[str], cands: Optional[List
     d.about = info.get("longBusinessSummary")
     addr = [info.get(k) for k in ("address1", "address2", "city", "state", "zip", "country")]
     d.corporate_address = ", ".join(str(a) for a in addr if a) or None
-    mc = _cr(info.get("marketCap"))
-    if mc is not None:
-        d.market_cap = Amount(value_cr=mc, period=date.today().isoformat(), source_url="Yahoo Finance")
     d.directors = [
         Person(name=o["name"], designation=o.get("title"))
         for o in (info.get("companyOfficers") or [])[:10] if o.get("name")
@@ -261,10 +257,6 @@ def _listed(sym: str, d: CompanyOnePager, notes: List[str], cands: Optional[List
     if d.directors:
         d.data_gaps.append("'Directors' lists key executives from Yahoo; full board (with DINs) is on MCA / BSE-NSE filings.")
 
-    if cands is not None:
-        cands += _yahoo_cands(t, f"https://finance.yahoo.com/quote/{sym}/financials")
-    pct = _num(info.get("heldPercentInsiders"))
-    d.promoter_holding_pct = None if pct is None else round(pct * 100, 2)
     d.sources.append(f"https://finance.yahoo.com/quote/{sym}")
     d.sources.append(f"https://www.screener.in/company/{sym.split('.')[0]}/consolidated/")
     notes.append(f"Yahoo Finance ticker {sym}; statements in INR, converted to Rs. crore.")
@@ -279,6 +271,13 @@ def _apply_screener(sc, d: CompanyOnePager, cands: List[Cand]) -> None:
         if val:
             cands.append(Cand(field, val[0], val[1], "Screener", sc.url, sc.basis, 0, f"Screener {sc.basis.lower()} balance sheet", "api"))
     d.sources.append(sc.url)
+    d.screener = sc.to_dict()
+    if sc.market_cap_cr is not None:
+        d.market_cap = Amount(value_cr=sc.market_cap_cr, period=date.today().isoformat(), basis="Current", source="Screener", source_url=sc.url)
+    promo = next((v for k, v in sc.shareholding.items() if k.lower().startswith("promoter")), None)
+    if promo:
+        d.promoter_holding_pct = promo[sorted(promo)[-1]] if promo else None
+    d.industry = d.industry or ", ".join(x for x in (sc.sector, sc.industry) if x) or None
 
 
 FIELD_LABELS = {"about": "About", "corporate_address": "Corporate address", "authorised_capital": "Authorised capital",
@@ -383,7 +382,7 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 notes.append(f"Ticker lookup failed: {e}")
         if sym:
             try:
-                _try(d, "Yahoo Finance", _listed, sym, d, notes, cands)
+                _try(d, "Yahoo Finance", _listed, sym, d, notes)
                 d.confidence = "Medium" if d.revenue else d.confidence
             except Exception as e:
                 d.data_gaps.append(f"Yahoo Finance fetch failed for {sym}: {e}")
@@ -406,11 +405,9 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                     d.sources += sc.rating_links
                     d.data_gaps.append("Rating rationale PDFs on Screener (open for the exact rating): " + ", ".join(sc.rating_links))
             else:
-                d.data_gaps.append("Screener consolidated page not reachable; financials are Yahoo's - confirm they are consolidated.")
+                d.data_gaps.append("Screener page not reachable - financial numbers could not be fetched (numbers come from Screener only). Retry later or enter manually.")
         else:
             d.listed_status = d.listed_status or "Unlisted / not found on NSE-BSE"
-            d.data_gaps.append("Unlisted: net worth, investments, revenue, PAT, cash, debt need the consolidated balance sheet "
-                               f"(MCA filing / Tofler https://www.tofler.in/search?q={quote_plus(req.name)} / rating rationale).")
 
         # 3. Company website: about, address, products, factories (website wins over Yahoo/Zauba text)
         site_url = d.website
@@ -455,38 +452,21 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
             attempts.append((["about", "corporate_address", "products_and_services", "factories", "directors", "group_companies"],
                              "Company website", site_url or "", False, "website not found or not reachable"))
             d.data_gaps.append(f"Company website {'not reachable' if site_url else 'not found'}: about/address/products/factories need manual entry.")
-        # 3b. Numbers, priority 1: company's own pages and annual reports (then Screener already collected, then others)
-        from . import fin_extract, numbers
+        # 3b. NUMBERS: Screener only (no PDFs, no Yahoo, no snippets). Everything else on the page may come from anywhere.
+        from . import numbers
         nfields = ["revenue", "pat", "net_worth", "debt", "cash", "non_current_investments", "current_investments"]
-        have = {c.field for c in cands if c.source == "Screener"}
-        need = [f for f in nfields if f not in have]   # what Screener could not give
-        if site and need:
-            for url, html in site.fin_html:
-                got = _try(d, "Website financial page", fin_extract.from_html, html, "Company website", url, default=[])
-                cands += got
-                attempts.append((nfields, "Company website", url, bool(got), f"{len(got)} numbers read" if got else "page read, no labelled numbers with a readable year+unit"))
-            if not site.fin_html:
-                attempts.append((nfields, "Company website", site.page_urls.get("investor") or site.url, False, "no investor/financial-results page found"))
-        pdfs = list(dict.fromkeys((site.annual_reports if site else []) + ((sc.annual_reports if sc else []) if sym else [])))
-        if READ_PDFS and pdfs and (need or have):
-            for url in pdfs[:2]:
-                got = _try(d, "Annual report PDF", fin_extract.from_pdf, url, default=[])
-                cands += got
-                attempts.append((nfields, "Annual report PDF", url, bool(got), f"{len(got)} numbers read" if got else "no readable numbers (scanned/odd layout/too big)"))
-        elif pdfs:
-            attempts.append((nfields, "Annual report PDF", pdfs[0], False, "not read (PDF cross-check is off; Screener is the primary source)"))
-        else:
-            attempts.append((nfields, "Annual report PDF", "", False, "no annual-report link found on the website or Screener"))
-        if not any(c.field == "revenue" for c in cands):  # nothing structured at all: try quoted figures in search results
-            for r in _search(f'"{d.company_name}" revenue net profit crore FY', 8):
-                cands += fin_extract.from_snippet(f"{r.get('title','')}. {r.get('body','')}", r.get("href", ""))
-        # Screener is the authority: other sources only fill fields Screener lacks (or act as a cross-check when PDFs are on)
-        cands = [c for c in cands if c.source == "Screener" or c.field in need or READ_PDFS]
+        if not any(c.source == "Screener" for c in cands):
+            d.data_gaps.append(
+                "No Screener page (unlisted, or Screener unreachable) - financial numbers are NOT auto-filled (numbers come from Screener only). "
+                f"Look up: Tofler https://www.tofler.in/search?q={quote_plus(req.name)} or the credit-rating rationale, "
+                "then type them into 'Fill / correct missing fields'.")
+        elif not any(c.field == "current_investments" for c in cands):
+            d.data_gaps.append("Current investments: Screener does not report this line - enter manually if needed.")
         numbers.resolve(cands, d)
-        if cands and d.revenue and d.confidence != "High":
-            d.confidence = "High" if any(y.source in ("Company website", "Annual report PDF", "Screener") for y in d.revenue) else "Medium"
+        if d.revenue:
+            d.confidence = "High"
         if not d.revenue:
-            d.data_gaps.append("Revenue/PAT not found from website, annual report, Screener or other sources - use the links below.")
+            d.data_gaps.append("Revenue/PAT not available: numbers come from Screener only and this company has no Screener data - enter manually.")
         from . import wiki
         w = _try(d, "Wikipedia/Wikidata", wiki.fetch, d.company_name, lambda t: similar(d.company_name, t) >= 0.55)
         attempts.append((["about", "group_companies"], "Wikipedia/Wikidata", w.url if w else "https://en.wikipedia.org/w/index.php?search=" + quote_plus(d.company_name), bool(w), "article found" if w else "no matching article"))

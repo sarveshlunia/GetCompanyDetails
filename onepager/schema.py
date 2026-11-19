@@ -122,6 +122,7 @@ class CompanyOnePager(BaseModel):
     )
     field_urls: dict = Field(default_factory=dict, description="field name -> URL it came from.")
     search_links: dict = Field(default_factory=dict, description="label -> ready-made search/verify URL.")
+    screener: dict = Field(default_factory=dict, description="Everything read from Screener: ratios, tables, shareholding, pros/cons.")
     verification: List[dict] = Field(default_factory=list, description="Statement value vs Screener value per metric.")
     trail: List[dict] = Field(default_factory=list, description="Per field: every source tried, its link and result.")
     searches: List[dict] = Field(default_factory=list, description="Web searches run: query + clickable Google link.")

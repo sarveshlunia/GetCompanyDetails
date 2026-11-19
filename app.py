@@ -8,7 +8,6 @@ import streamlit as st
 
 from onepager.export import build_docx, build_xlsx, build_zip
 from onepager.parse_input import from_file, from_text
-import onepager.research as research
 from onepager.research import run_company
 from onepager import zauba
 from urllib.parse import quote_plus
@@ -94,6 +93,33 @@ def render(d, i: int):
             st.markdown(bullets(d.recent_news))
 
 
+def render_screener(d, i: int):
+    sc = d.screener or {}
+    if not sc:
+        st.info("No Screener data (company not listed on Screener, or Screener unreachable). Financial numbers are not auto-filled.")
+        return
+    st.markdown(f"**Source:** [Screener ({sc.get('basis', 'Consolidated')}) ↗]({sc.get('url', '')})"
+                + (f"  ·  Sector: {sc['sector']}" if sc.get("sector") else "") + (f"  ·  Industry: {sc['industry']}" if sc.get("industry") else ""))
+    if sc.get("top_ratios"):
+        st.dataframe(pd.DataFrame(list(sc["top_ratios"].items()), columns=["Ratio", "Value"]), hide_index=True)
+    names = [n for n in ("Profit & Loss", "Balance Sheet", "Cash Flow", "Ratios", "Quarterly results") if sc.get("tables", {}).get(n)]
+    if sc.get("shareholding"):
+        names.append("Shareholding %")
+    for parent in sc.get("schedules", {}):
+        if sc["schedules"][parent]:
+            names.append(parent)
+    if names:
+        for tab, n in zip(st.tabs(names), names):
+            with tab:
+                data = sc["shareholding"] if n == "Shareholding %" else sc["tables"].get(n) or sc["schedules"].get(n) or {}
+                st.dataframe(pd.DataFrame(data).T)
+    c1, c2 = st.columns(2)
+    if sc.get("pros"):
+        c1.markdown("**Pros (Screener)**\n" + "\n".join(f"- {x}" for x in sc["pros"]))
+    if sc.get("cons"):
+        c2.markdown("**Cons (Screener)**\n" + "\n".join(f"- {x}" for x in sc["cons"]))
+
+
 def _lines(t):
     return [x.strip(" -•\t") for x in t.splitlines() if x.strip()]
 
@@ -158,8 +184,7 @@ typed = st.text_area(
     "Type company names (one per line). Optional: `Company | Meetup person | Ticker e.g. XYZ.NS or website`",
     height=140, placeholder="Tata Motors Limited\nSupreme Industries | Ramesh Kumar | Mumbai")
 up = st.file_uploader("...or upload CSV / XLSX / TXT (columns: Company, Meetup Person, Hint)", type=["csv", "xlsx", "txt"])
-read_pdfs = st.checkbox("Also read annual-report PDFs as a cross-check (slow, less accurate - Screener is always the primary source)", value=False)
-research.READ_PDFS = read_pdfs
+st.caption("All financial numbers come from Screener only (listed companies). Everything else is gathered from the best available source.")
 workers = st.slider("Parallel companies", 1, 5, 2, help="Lower = fewer blocked requests.")
 
 reqs = from_text(typed)
@@ -204,6 +229,8 @@ if ok:
                     st.markdown(f"- [{label}]({url})")
                 if d.field_urls.get("annual_report"):
                     st.markdown(f"- [Annual report (found)]({d.field_urls['annual_report']})")
+            with st.expander("Screener data - ratios, P&L, balance sheet, cash flow, shareholding", expanded=True):
+                render_screener(d, i)
             if d.verification:
                 with st.expander(f"Cross-check vs company filings ({len(d.verification)} comparisons)", expanded=any(v["status"] == "DIFFERS" for v in d.verification)):
                     vdf = pd.DataFrame(d.verification)

@@ -29,6 +29,24 @@ class ScreenerData:
     name: Optional[str] = None
     about: Optional[str] = None
     website: Optional[str] = None
+    market_cap_cr: Optional[float] = None
+    top_ratios: Dict[str, str] = field(default_factory=dict)
+    tables: Dict[str, Dict[str, Dict[str, float]]] = field(default_factory=dict)   # section -> row -> FY -> value
+    shareholding: Dict[str, Dict[str, float]] = field(default_factory=dict)        # row -> 'Dec 2024' -> %
+    schedules: Dict[str, Dict[str, Dict[str, float]]] = field(default_factory=dict)
+    pros: List[str] = field(default_factory=list)
+    cons: List[str] = field(default_factory=list)
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+
+    def to_dict(self, years: int = 5) -> dict:
+        """JSON-friendly copy for the UI / Excel: only the latest `years` columns of each table."""
+        def trim(tbl):
+            return {row: dict(sorted(v.items())[-years:]) for row, v in tbl.items() if v}
+        return {"url": self.url, "basis": self.basis, "name": self.name, "sector": self.sector, "industry": self.industry,
+                "top_ratios": self.top_ratios, "tables": {k: trim(v) for k, v in self.tables.items()},
+                "shareholding": {r: dict(list(v.items())[-4:]) for r, v in self.shareholding.items() if v},
+                "schedules": {k: trim(v) for k, v in self.schedules.items()}, "pros": self.pros, "cons": self.cons}
 
 
 def _f(s: str) -> Optional[float]:
@@ -39,26 +57,31 @@ def _f(s: str) -> Optional[float]:
         return None
 
 
-def _table(soup, section_id) -> Dict[str, Dict[str, float]]:
-    sec = soup.find(id=section_id)
-    t = sec.find("table") if sec else None
-    if not t:
-        return {}
-    heads = [th.get_text(strip=True) for th in t.find("thead").find_all("th")][1:]
-    fy = [None if h.startswith("TTM") else f"FY{h.split()[-1]}" for h in heads]  # 'Mar 2025' -> FY2025
+def _read_table(t, raw: bool = False) -> Dict[str, Dict[str, float]]:
+    thead = t.find("thead")
+    heads = [th.get_text(strip=True) for th in (thead.find_all("th") if thead else t.find("tr").find_all(["th", "td"]))][1:]
+    cols = [h if raw else (None if (not h or h.startswith("TTM")) else f"FY{h.split()[-1]}") for h in heads]  # 'Mar 2025' -> FY2025
     rows = {}
-    for tr in t.find("tbody").find_all("tr"):
+    body = t.find("tbody") or t
+    for tr in body.find_all("tr"):
         tds = tr.find_all("td")
         if not tds:
             continue
-        label = re.sub(r"[\s +]+$", "", tds[0].get_text(" ", strip=True)).strip()
+        label = re.sub(r"[\s\u00a0+]+$", "", tds[0].get_text(" ", strip=True)).strip()
         vals = {}
-        for y, td in zip(fy, tds[1:]):
+        for y, td in zip(cols, tds[1:]):
             v = _f(td.get_text(strip=True))
             if y and v is not None:
                 vals[y] = v
-        rows[label] = vals
+        if label:
+            rows[label] = vals
     return rows
+
+
+def _table(soup, section_id, raw: bool = False, container_id: Optional[str] = None) -> Dict[str, Dict[str, float]]:
+    sec = soup.find(id=container_id or section_id)
+    t = sec.find("table") if sec else None
+    return _read_table(t, raw) if t else {}
 
 
 def parse(html: str, url: str = "") -> ScreenerData:
@@ -94,6 +117,22 @@ def parse(html: str, url: str = "") -> ScreenerData:
         if not re.search(r"bseindia|nseindia|screener", a["href"]):
             s.website = a["href"]
             break
+    s.tables = {"Profit & Loss": pl, "Balance Sheet": bs, "Cash Flow": _table(soup, "cash-flow"), "Ratios": _table(soup, "ratios"),
+                "Quarterly results": _table(soup, "quarters")}
+    s.shareholding = _table(soup, "shareholding", raw=True, container_id="quarterly-shp") or _table(soup, "shareholding", raw=True)
+    for li in soup.select("#top-ratios li"):
+        nm, vl = li.select_one(".name"), li.select_one(".value")
+        if nm and vl:
+            s.top_ratios[nm.get_text(" ", strip=True)] = re.sub(r"\s+", " ", vl.get_text(" ", strip=True)).replace("\u20b9", "Rs.")
+    mc = s.top_ratios.get("Market Cap")
+    if mc:
+        m = re.search(r"\d[\d,]*(?:\.\d+)?", mc)
+        s.market_cap_cr = _f(m.group(0)) if m else None
+    s.pros = [li.get_text(" ", strip=True) for li in soup.select(".pros li")][:8]
+    s.cons = [li.get_text(" ", strip=True) for li in soup.select(".cons li")][:8]
+    sec_a, ind_a = soup.select_one('a[title="Sector"]'), soup.select_one('a[title="Industry"]')
+    s.sector = sec_a.get_text(strip=True) if sec_a else None
+    s.industry = ind_a.get_text(strip=True) if ind_a else None
     s.borrowings = last(bs.get("Borrowings", {}))
     s.investments = last(bs.get("Investments", {}))
     for h in soup.find_all(["h3", "h4", "h5"]):
@@ -120,29 +159,43 @@ def fetch(symbol: str) -> Optional[ScreenerData]:
         return None
     sc = parse(html, url)
     if sc.warehouse_id:
-        sc.cash = _cash(sc.warehouse_id)
+        for parent in ("Other Assets", "Other Liabilities", "Borrowings"):
+            try:
+                sc.schedules[parent] = _schedule(sc.warehouse_id, parent, sc.basis == "Consolidated")
+            except Exception:
+                sc.schedules[parent] = {}
+        sc.cash = _cash_from(sc.schedules)
     return sc
 
 
-def _cash(wid: str) -> Optional[tuple]:
-    """Screener's expandable 'Other Assets' schedule has a 'Cash Equivalents' row (consolidated)."""
+def _schedule(wid: str, parent: str, consolidated: bool) -> Dict[str, Dict[str, float]]:
+    """Screener's expandable balance-sheet rows (Other Assets / Other Liabilities / Borrowings) as {row: {FY: value}}."""
     import json
-    raw = get(f"https://www.screener.in/api/company/{wid}/schedules/?parent=Other+Assets&section=balance-sheet&consolidated=",
-              accept_json=True)
+    from urllib.parse import quote_plus
+    raw = get(f"https://www.screener.in/api/company/{wid}/schedules/?parent={quote_plus(parent)}&section=balance-sheet"
+              + ("&consolidated=" if consolidated else ""), accept_json=True)
     try:
         data = json.loads(raw) if raw else {}
     except ValueError:
-        return None
-    row = next((v for k, v in data.items() if "cash" in k.lower()), None)
-    if not isinstance(row, dict):
-        return None
-    vals = {}
-    for k, v in row.items():
-        m = re.search(r"(\d{4})", k)
-        f = _f(str(v))
-        if m and f is not None:
-            vals[f"FY{m.group(1)}"] = f
-    return (max(vals), vals[max(vals)]) if vals else None
+        return {}
+    out: Dict[str, Dict[str, float]] = {}
+    for row, cols in (data.items() if isinstance(data, dict) else []):
+        if not isinstance(cols, dict):
+            continue
+        vals = {}
+        for k, v in cols.items():
+            m = re.search(r"(\d{4})", k)
+            f = _f(str(v))
+            if m and f is not None:
+                vals[f"FY{m.group(1)}"] = f
+        if vals:
+            out[row] = vals
+    return out
+
+
+def _cash_from(schedules: Dict[str, Dict[str, Dict[str, float]]]) -> Optional[tuple]:
+    row = next((v for k, v in schedules.get("Other Assets", {}).items() if "cash" in k.lower()), None)
+    return (max(row), row[max(row)]) if row else None
 
 
 def search_all(name: str, limit: int = 6) -> List[tuple]:

@@ -130,6 +130,11 @@ def build_docx(d: CompanyOnePager) -> bytes:
         p.add_run(title).bold = True
         for it in items:
             doc.add_paragraph(it, style="List Bullet") if "List Bullet" in [s.name for s in doc.styles] else doc.add_paragraph(f"• {it}")
+    kr = (d.screener or {}).get("top_ratios") or {}
+    if kr:
+        p = doc.add_paragraph()
+        p.add_run("Screener key ratios").bold = True
+        doc.add_paragraph("; ".join(f"{k}: {v}" for k, v in kr.items()))
     p = doc.add_paragraph()
     p.add_run(f"Confidence: {d.confidence}. AI-researched from public sources - verify before relying on any figure.").italic = True
     buf = io.BytesIO()
@@ -180,6 +185,26 @@ def build_xlsx(items: List[CompanyOnePager]) -> bytes:
     for col in ws.columns:
         ws.column_dimensions[col[0].column_letter].width = 22
     ws.freeze_panes = "B2"
+    long = wb.create_sheet("Screener data (long)")
+    long.append(["Company", "Section", "Metric", "Period", "Value"])
+    for d in items:
+        sc = d.screener or {}
+        for k, v in (sc.get("top_ratios") or {}).items():
+            long.append([d.company_name, "Key ratios", k, "Current", v])
+        for sect, rows in (sc.get("tables") or {}).items():
+            for metric, cols in rows.items():
+                for period, val in cols.items():
+                    long.append([d.company_name, sect, metric, period, val])
+        for metric, cols in (sc.get("shareholding") or {}).items():
+            for period, val in cols.items():
+                long.append([d.company_name, "Shareholding %", metric, period, val])
+        for parent, rows in (sc.get("schedules") or {}).items():
+            for metric, cols in rows.items():
+                for period, val in cols.items():
+                    long.append([d.company_name, f"Schedule: {parent}", metric, period, val])
+    for col in long.columns:
+        long.column_dimensions[col[0].column_letter].width = 26
+    long.freeze_panes = "A2"
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
