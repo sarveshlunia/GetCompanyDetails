@@ -205,7 +205,7 @@ if ok:
             if d.trail:
                 with st.expander(f"How each field was searched ({len(d.trail)} attempts) - source, link, result", expanded=False):
                     df = pd.DataFrame(d.trail)[["field", "source", "url", "result"]].sort_values(["field", "source"])
-                    st.dataframe(df, hide_index=True, use_container_width=True,
+                    st.dataframe(df, hide_index=True,
                                  column_config={"url": st.column_config.LinkColumn("link", display_text="open ↗"),
                                                 "result": st.column_config.TextColumn("result", width="large")})
             if d.searches:
