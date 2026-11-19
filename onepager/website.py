@@ -175,6 +175,8 @@ def _links(html: str, base: str) -> dict:
 
 
 def fetch(site: str) -> Optional[SiteData]:
+    if urlparse(site).path == "":
+        site += "/"
     home = get(site)
     if not home:
         return None

@@ -40,15 +40,24 @@ web request returned; send it to the developer when fields come back empty.
 - Every value shows a clickable source link; each company has a "Search it yourself" list of ready-made links
   (Zauba, Tofler, MCA, NSE/BSE, rating agencies, LinkedIn, site-specific searches).
 
-## Numbers: Screener only
-Every financial number (revenue, PAT, net worth, debt, investments, cash, market cap, ratios, cash flow, shareholding,
-promoter holding) comes from **Screener** only - consolidated, or standalone if that is all Screener has (labelled).
-It is shown on screen (ratios, P&L, balance sheet, cash flow, ratios, shareholding, Other Assets/Liabilities/Borrowings
-schedules, pros/cons) and exported to Excel ("Screener data (long)" sheet, ready for pivots/Power BI).
-No PDFs, Yahoo or search snippets are used for numbers. Unlisted companies have no Screener page, so their numbers are
-left blank (type them into "Fill / correct"). Authorised/paid-up capital are registry data and still come from Zauba.
-All non-numeric fields (about, address, directors, products, factories, group companies, ratings, news, person) are
-gathered from whichever source is relevant.
+## One source order for every field
+**1 Screener -> 2 Zauba -> 3 company website -> 4 other sites** (Yahoo, Wikipedia/Wikidata, search results).
+The first source that has a value fills it; later sources only fill what is still empty. The source link is shown to the
+right of every value; an empty field shows a ready "search" link instead.
+
+| Field | Where it can come from (in order) |
+|---|---|
+| Revenue, PAT, net worth, debt, investments, cash, market cap | Screener -> company website financial pages -> annual-report PDF (gaps only) -> Yahoo -> search quotes |
+| Authorised / paid-up capital, CIN | Zauba (or pasted Zauba page) -> search quotes |
+| About | Screener -> Company website -> Yahoo -> Wikipedia -> search |
+| Address | Zauba -> website -> Yahoo |
+| Directors | Zauba -> website board page -> Yahoo executives -> search |
+| Products, factories | Company website |
+| Group companies | Company website -> Wikidata |
+| Ratings | Search results (agency sites) - always verify |
+
+Numbers read from the website/PDF/Yahoo/search are flagged "NOT verified". A Screener figure is never overridden by them.
+Screener data (ratios, P&L, balance sheet, cash flow, shareholding, schedules, pros/cons) is shown on screen and in Excel.
 
 ## Blunt limits
 - Zauba is bot-protected and Screener/company sites change HTML; scrapers are best-effort and written against

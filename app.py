@@ -19,25 +19,33 @@ st.title("Indian Company One-Pager Generator")
 NF = ":red[Not found]"
 
 
+SEARCH_FOR = {"about": "About / address (Google)", "corporate_address": "About / address (Google)", "listed_status": "Screener (if listed)",
+              "authorised_capital": "Zauba Corp (capital, directors)", "paid_up_capital": "Zauba Corp (capital, directors)",
+              "directors": "Directors", "products_and_services": "Products & services", "factories": "Factories / plants",
+              "group_companies": "Group companies / subsidiaries", "long_term_rating": "Credit rating - CRISIL",
+              "short_term_rating": "Credit rating - ICRA", "meetup_person": "Person on LinkedIn", "market_cap": "Screener (if listed)",
+              "net_worth": "Tofler (financials, directors)", "revenue": "Tofler (financials, directors)", "pat": "Tofler (financials, directors)",
+              "debt": "Tofler (financials, directors)", "cash_and_equivalents": "Tofler (financials, directors)",
+              "non_current_investments": "Tofler (financials, directors)", "current_investments": "Tofler (financials, directors)"}
+
+
 def _src(source, url) -> str:
     if source and url:
-        return f" · [{source} ↗]({url})"
-    return f" · {source}" if source else ""
+        return f"[{source} ↗]({url})"
+    return source or ""
 
 
 def fmt_amt(a: Amount) -> str:
     if a.value_cr is None:
         return NF
     extra = ", ".join(x for x in (a.basis, a.period) if x)
-    return (f"Rs. {a.value_cr:,.2f} Cr" + (f"  ({extra})" if extra else "") + _src(a.source, a.source_url)
-            + (f"  \n:grey[{a.verify}]" if a.verify else ""))
+    return f"Rs. {a.value_cr:,.2f} Cr" + (f"  ({extra})" if extra else "") + (f"  \n:grey[{a.verify}]" if a.verify else "")
 
 
 def fmt_years(items) -> str:
     if not items:
         return NF
-    return "  \n".join(f"**{y.fiscal_year}**: Rs. {y.value_cr:,.2f} Cr ({y.basis or '-'})" + _src(y.source, y.source_url)
-                       + (f"  \n:grey[{y.verify}]" if y.verify else "")
+    return "  \n".join(f"**{y.fiscal_year}**: Rs. {y.value_cr:,.2f} Cr ({y.basis or '-'})" + (f"  :grey[{y.verify}]" if y.verify else "")
                        for y in sorted(items, key=lambda y: y.fiscal_year, reverse=True)[:3])
 
 
@@ -49,45 +57,60 @@ def bullets(xs) -> str:
     return NF if not xs else "\n".join(f"- {x}" for x in xs)
 
 
-def row(label: str, value: str, src: str = "", url: str = ""):
-    c1, c2, c3 = st.columns([1.2, 4, 1.3])
+def side(d, key: str, empty: bool, items=None) -> str:
+    """Right-hand column: link to where the value came from, or a ready search link when nothing was found."""
+    if items:  # per-year sources
+        return "  \n".join(_src(y.source, y.source_url) or "-" for y in sorted(items, key=lambda y: y.fiscal_year, reverse=True)[:3])
+    url, src = d.field_urls.get(key, ""), d.field_sources.get(key, "")
+    if url and not empty:
+        return _src(src or "source", url)
+    if src and not empty:
+        return src
+    link = d.search_links.get(SEARCH_FOR.get(key, ""))
+    if empty and link:
+        return f"[search ↗]({link})"
+    return ""
+
+
+def row(label: str, value: str, side_md: str = ""):
+    c1, c2, c3 = st.columns([1.2, 4, 1.5])
     c1.markdown(f"**{label}**")
     c2.markdown(value or NF)
-    if url:
-        c3.markdown(f"[{src or 'source'} ↗]({url})")
-    elif src:
-        c3.caption(src)
+    if side_md:
+        c3.markdown(side_md)
 
 
 def render(d, i: int):
-    fs, fu = d.field_sources, d.field_urls
     if d.red_flags:
         st.error("Red flags: " + " | ".join(d.red_flags))
-    row("About", d.about or "", fs.get("about", ""), fu.get("about", ""))
-    row("Corporate Address", d.corporate_address or "", fs.get("corporate_address", ""), fu.get("corporate_address", ""))
-    row("Listed / Unlisted", d.listed_status or "")
-    row("Authorised Capital", fmt_amt(d.authorised_capital), fs.get("authorised_capital", ""), fu.get("authorised_capital", ""))
-    row("Paid-up Capital", fmt_amt(d.paid_up_capital), fs.get("paid_up_capital", ""), fu.get("paid_up_capital", ""))
+    E = lambda v: v is None or v == "" or v == []
+    EA = lambda a: a.value_cr is None
+    row("About", d.about or "", side(d, "about", E(d.about)))
+    row("Corporate Address", d.corporate_address or "", side(d, "corporate_address", E(d.corporate_address)))
+    row("Listed / Unlisted", d.listed_status or "", side(d, "listed_status", E(d.listed_status)))
+    row("Authorised Capital", fmt_amt(d.authorised_capital), side(d, "authorised_capital", EA(d.authorised_capital)))
+    row("Paid-up Capital", fmt_amt(d.paid_up_capital), side(d, "paid_up_capital", EA(d.paid_up_capital)))
     if d.market_cap.value_cr is not None:
-        row("Market Cap (extra)", fmt_amt(d.market_cap), "Yahoo")
-    row("Net Worth", fmt_amt(d.net_worth), "", "")
-    row("Investment Detail", f"Non-Current: {fmt_amt(d.non_current_investments)}  \nCurrent: {fmt_amt(d.current_investments)}")
-    row("Revenue (3 yrs)", fmt_years(d.revenue), "", "")
-    row("PAT (3 yrs)", fmt_years(d.pat), "", "")
-    row("Cash & Equivalents", fmt_amt(d.cash_and_equivalents))
-    row("Debt", fmt_amt(d.debt), "", "")
-    row("Long Term Rating", fmt_rating(d.long_term_rating))
-    row("Short Term Rating", fmt_rating(d.short_term_rating))
+        row("Market Cap (extra)", fmt_amt(d.market_cap), side(d, "market_cap", False))
+    row("Net Worth", fmt_amt(d.net_worth), side(d, "net_worth", EA(d.net_worth)))
+    row("Investment Detail", f"Non-Current: {fmt_amt(d.non_current_investments)}  \nCurrent: {fmt_amt(d.current_investments)}",
+        f"{side(d, 'non_current_investments', EA(d.non_current_investments))}  \n{side(d, 'current_investments', EA(d.current_investments))}")
+    row("Revenue (3 yrs)", fmt_years(d.revenue), side(d, "revenue", not d.revenue, d.revenue))
+    row("PAT (3 yrs)", fmt_years(d.pat), side(d, "pat", not d.pat, d.pat))
+    row("Cash & Equivalents", fmt_amt(d.cash_and_equivalents), side(d, "cash_and_equivalents", EA(d.cash_and_equivalents)))
+    row("Debt", fmt_amt(d.debt), side(d, "debt", EA(d.debt)))
+    row("Long Term Rating", fmt_rating(d.long_term_rating), side(d, "long_term_rating", not d.long_term_rating.rating))
+    row("Short Term Rating", fmt_rating(d.short_term_rating), side(d, "short_term_rating", not d.short_term_rating.rating))
     row("Directors", bullets([f"{p.name}" + (f" - {p.designation}" if p.designation else "") + (f" (DIN {p.din})" if p.din else "")
-                              for p in d.directors]), fs.get("directors", ""), fu.get("directors", ""))
-    row("Products & Services", bullets(d.products_and_services), fs.get("products_and_services", ""), fu.get("products_and_services", ""))
+                              for p in d.directors]), side(d, "directors", not d.directors))
+    row("Products & Services", bullets(d.products_and_services), side(d, "products_and_services", not d.products_and_services))
     mp = d.meetup_person
-    row("Meetup Person", mp.name or "")
-    row("Designation", mp.designation or "")
-    row("LinkedIn", f"[{mp.linkedin_url}]({mp.linkedin_url})" if mp.linkedin_url else "", "")
-    row("LinkedIn History", bullets(mp.career_history))
-    row("Factories", bullets(d.factories), fs.get("factories", ""), fu.get("factories", ""))
-    row("Group Companies", bullets(d.group_companies), fs.get("group_companies", ""), fu.get("group_companies", ""))
+    row("Meetup Person", mp.name or "", side(d, "meetup_person", not mp.name))
+    row("Designation", mp.designation or "", "")
+    row("LinkedIn", f"[{mp.linkedin_url}]({mp.linkedin_url})" if mp.linkedin_url else "", "" if mp.linkedin_url else side(d, "meetup_person", True))
+    row("LinkedIn History", bullets(mp.career_history), "")
+    row("Factories", bullets(d.factories), side(d, "factories", not d.factories))
+    row("Group Companies", bullets(d.group_companies), side(d, "group_companies", not d.group_companies))
     if d.recent_news:
         with st.expander("Recent news"):
             st.markdown(bullets(d.recent_news))
@@ -184,7 +207,7 @@ typed = st.text_area(
     "Type company names (one per line). Optional: `Company | Meetup person | Ticker e.g. XYZ.NS or website`",
     height=140, placeholder="Tata Motors Limited\nSupreme Industries | Ramesh Kumar | Mumbai")
 up = st.file_uploader("...or upload CSV / XLSX / TXT (columns: Company, Meetup Person, Hint)", type=["csv", "xlsx", "txt"])
-st.caption("All financial numbers come from Screener only (listed companies). Everything else is gathered from the best available source.")
+st.caption("Source order for every field: 1 Screener, 2 Zauba, 3 company website, 4 other sites. The link beside each value shows where it came from; empty fields show a search link.")
 workers = st.slider("Parallel companies", 1, 5, 2, help="Lower = fewer blocked requests.")
 
 reqs = from_text(typed)

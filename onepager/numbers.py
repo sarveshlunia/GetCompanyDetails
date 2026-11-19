@@ -17,7 +17,7 @@ from typing import Dict, List, Optional
 from .fin_extract import Cand, POINT_FIELDS
 from .schema import Amount, CompanyOnePager, YearFigure
 
-SOURCE_RANK = {"Screener": 1, "Company website": 2, "Annual report PDF": 2, "Yahoo Finance": 3, "Search snippet": 4}
+SOURCE_RANK = {"Screener": 1, "Zauba": 2, "Company website": 3, "Annual report PDF": 3, "Yahoo Finance": 4, "Search snippet": 5}
 FIELD_ATTR = {"revenue": "revenue", "pat": "pat", "net_worth": "net_worth", "debt": "debt", "cash": "cash_and_equivalents",
               "non_current_investments": "non_current_investments", "current_investments": "current_investments"}
 LABEL = {"revenue": "Revenue", "pat": "PAT", "net_worth": "Net worth", "debt": "Debt", "cash": "Cash & equivalents",
