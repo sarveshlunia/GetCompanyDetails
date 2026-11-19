@@ -3,10 +3,12 @@
 import concurrent.futures as cf
 import re
 
+import pandas as pd
 import streamlit as st
 
 from onepager.export import build_docx, build_xlsx, build_zip
 from onepager.parse_input import from_file, from_text
+import onepager.research as research
 from onepager.research import run_company
 from onepager import zauba
 from urllib.parse import quote_plus
@@ -18,17 +20,23 @@ st.title("Indian Company One-Pager Generator")
 NF = ":red[Not found]"
 
 
+def _src(source, url) -> str:
+    if source and url:
+        return f" · [{source} ↗]({url})"
+    return f" · {source}" if source else ""
+
+
 def fmt_amt(a: Amount) -> str:
     if a.value_cr is None:
         return NF
     extra = ", ".join(x for x in (a.basis, a.period) if x)
-    return f"Rs. {a.value_cr:,.2f} Cr" + (f"  ({extra})" if extra else "")
+    return f"Rs. {a.value_cr:,.2f} Cr" + (f"  ({extra})" if extra else "") + _src(a.source, a.source_url)
 
 
 def fmt_years(items) -> str:
     if not items:
         return NF
-    return "  \n".join(f"**{y.fiscal_year}**: Rs. {y.value_cr:,.2f} Cr ({y.basis or '-'})"
+    return "  \n".join(f"**{y.fiscal_year}**: Rs. {y.value_cr:,.2f} Cr ({y.basis or '-'})" + _src(y.source, y.source_url)
                        for y in sorted(items, key=lambda y: y.fiscal_year, reverse=True)[:3])
 
 
@@ -61,12 +69,12 @@ def render(d, i: int):
     row("Paid-up Capital", fmt_amt(d.paid_up_capital), fs.get("paid_up_capital", ""), fu.get("paid_up_capital", ""))
     if d.market_cap.value_cr is not None:
         row("Market Cap (extra)", fmt_amt(d.market_cap), "Yahoo")
-    row("Net Worth", fmt_amt(d.net_worth), fs.get("net_worth", ""), fu.get("net_worth", ""))
+    row("Net Worth", fmt_amt(d.net_worth), "", "")
     row("Investment Detail", f"Non-Current: {fmt_amt(d.non_current_investments)}  \nCurrent: {fmt_amt(d.current_investments)}")
-    row("Revenue (3 yrs)", fmt_years(d.revenue), fs.get("revenue", ""), fu.get("revenue", ""))
-    row("PAT (3 yrs)", fmt_years(d.pat), fs.get("pat", ""), fu.get("pat", ""))
+    row("Revenue (3 yrs)", fmt_years(d.revenue), "", "")
+    row("PAT (3 yrs)", fmt_years(d.pat), "", "")
     row("Cash & Equivalents", fmt_amt(d.cash_and_equivalents))
-    row("Debt", fmt_amt(d.debt), fs.get("debt", ""), fu.get("debt", ""))
+    row("Debt", fmt_amt(d.debt), "", "")
     row("Long Term Rating", fmt_rating(d.long_term_rating))
     row("Short Term Rating", fmt_rating(d.short_term_rating))
     row("Directors", bullets([f"{p.name}" + (f" - {p.designation}" if p.designation else "") + (f" (DIN {p.din})" if p.din else "")
@@ -148,6 +156,8 @@ typed = st.text_area(
     "Type company names (one per line). Optional: `Company | Meetup person | Ticker e.g. XYZ.NS or website`",
     height=140, placeholder="Tata Motors Limited\nSupreme Industries | Ramesh Kumar | Mumbai")
 up = st.file_uploader("...or upload CSV / XLSX / TXT (columns: Company, Meetup Person, Hint)", type=["csv", "xlsx", "txt"])
+read_pdfs = st.checkbox("Read annual-report PDFs for numbers (slower, more complete)", value=True)
+research.READ_PDFS = read_pdfs
 workers = st.slider("Parallel companies", 1, 5, 2, help="Lower = fewer blocked requests.")
 
 reqs = from_text(typed)
@@ -192,6 +202,16 @@ if ok:
                     st.markdown(f"- [{label}]({url})")
                 if d.field_urls.get("annual_report"):
                     st.markdown(f"- [Annual report (found)]({d.field_urls['annual_report']})")
+            if d.trail:
+                with st.expander(f"How each field was searched ({len(d.trail)} attempts) - source, link, result", expanded=False):
+                    df = pd.DataFrame(d.trail)[["field", "source", "url", "result"]].sort_values(["field", "source"])
+                    st.dataframe(df, hide_index=True, use_container_width=True,
+                                 column_config={"url": st.column_config.LinkColumn("link", display_text="open ↗"),
+                                                "result": st.column_config.TextColumn("result", width="large")})
+            if d.searches:
+                with st.expander(f"Web searches run ({len(d.searches)}) - click to repeat any in Google"):
+                    for q in d.searches:
+                        st.markdown(f"- [{q['query']}]({q['url']})")
             with st.expander("Every source page used"):
                 for u in dict.fromkeys(x for x in d.sources if x):
                     st.markdown(f"- {u}")

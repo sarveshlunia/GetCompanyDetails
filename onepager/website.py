@@ -28,6 +28,7 @@ PAGE_KEYS = {
     "board": ("board-of-director", "board_of_director", "board of director", "directors", "leadership", "governance", "management-team", "our-team"),
     "group": ("subsidiar", "group-compan", "group compan", "our-group", "associate", "joint-venture", "group-structure"),
     "investor": ("investor", "annual-report", "annual report", "shareholder"),
+    "financials": ("financial", "results", "highlights", "key-figures", "at-a-glance", "performance"),
 }
 TITLE_RE = re.compile(r"\b(?:Mr|Ms|Mrs|Dr|Prof|Shri|Smt|Sri)\.?\s+([A-Z][A-Za-z.\-']+(?:\s+[A-Z][A-Za-z.\-']+){1,3})")
 ENTITY_RE = re.compile(r"\b(Ltd|Limited|Pvt|Private|LLP|Inc|Corporation|Corp|GmbH|PLC|Industries|Enterprises)\b\.?", re.I)
@@ -46,6 +47,7 @@ class SiteData:
     group: List[str] = field(default_factory=list)
     annual_reports: List[str] = field(default_factory=list)
     page_urls: dict = field(default_factory=dict)          # kind -> url
+    fin_html: List[tuple] = field(default_factory=list)    # (url, html) of investor/financial pages
 
 
 def pick_site(results: List[dict]) -> Optional[str]:
@@ -193,6 +195,8 @@ def fetch(site: str) -> Optional[SiteData]:
         fetched += 1
         out.pages.append(url)
         out.page_urls[kind] = url
+        if kind in ("investor", "financials"):
+            out.fin_html.append((url, html))
         parse_page(kind, html, url, out)
         # second level: pages like About / Investors often link to Board, Subsidiaries, Plants
         for k2, u2 in _links(html, url).items():

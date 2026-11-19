@@ -16,9 +16,11 @@ from datetime import date
 from typing import Any, List, Optional
 from urllib.parse import quote_plus
 
+from .fin_extract import Cand
 from .schema import Amount, CompanyOnePager, MeetupPerson, Person, Rating, YearFigure
 
 CR = 1e7  # 1 crore = 10 million
+READ_PDFS = True  # read annual-report PDFs for numbers (slower, more complete); the UI toggles this
 
 
 @dataclass
@@ -87,6 +89,7 @@ def _search(query: str, n: int = 6, news: bool = False) -> List[dict]:
     """DuckDuckGo with retries and backend fallback - it fails/rate-limits often."""
     import time
     from . import http
+    http.record_query(query)
     try:
         from ddgs import DDGS
     except Exception:
@@ -214,7 +217,28 @@ def _resolve_ticker(req: CompanyRequest) -> Optional[str]:
 
 
 # ---------------------------------------------------------------- main
-def _listed(sym: str, d: CompanyOnePager, notes: List[str]) -> None:
+def _yahoo_cands(t, url: str) -> List[Cand]:
+    inc, bal = t.income_stmt, t.balance_sheet
+    out: List[Cand] = []
+
+    def add(field, df, names, n):
+        row = _row(df, names)
+        for ts in sorted(row, reverse=True)[:n]:
+            cr = _cr(row[ts])
+            if cr is not None:
+                out.append(Cand(field, _fy(ts), cr, "Yahoo Finance", url, "Unspecified", 0, "Yahoo Finance statement row"))
+
+    add("revenue", inc, ["Total Revenue", "Operating Revenue"], 3)
+    add("pat", inc, ["Net Income", "Net Income Common Stockholders"], 3)
+    add("net_worth", bal, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"], 1)
+    add("non_current_investments", bal, ["Long Term Equity Investment", "Investments And Advances", "Investmentin Financial Assets"], 1)
+    add("current_investments", bal, ["Other Short Term Investments", "Available For Sale Securities", "Short Term Investments"], 1)
+    add("cash", bal, ["Cash Cash Equivalents And Short Term Investments", "Cash And Cash Equivalents"], 1)
+    add("debt", bal, ["Total Debt"], 1)
+    return out
+
+
+def _listed(sym: str, d: CompanyOnePager, notes: List[str], cands: Optional[List[Cand]] = None) -> None:
     import yfinance as yf
 
     t = yf.Ticker(sym)
@@ -237,14 +261,8 @@ def _listed(sym: str, d: CompanyOnePager, notes: List[str]) -> None:
     if d.directors:
         d.data_gaps.append("'Directors' lists key executives from Yahoo; full board (with DINs) is on MCA / BSE-NSE filings.")
 
-    inc, bal = t.income_stmt, t.balance_sheet
-    d.revenue = _years(_row(inc, ["Total Revenue", "Operating Revenue"]))
-    d.pat = _years(_row(inc, ["Net Income", "Net Income Common Stockholders"]))
-    d.net_worth = _latest(_row(bal, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"]))
-    d.non_current_investments = _latest(_row(bal, ["Long Term Equity Investment", "Investments And Advances", "Investmentin Financial Assets"]))
-    d.current_investments = _latest(_row(bal, ["Other Short Term Investments", "Available For Sale Securities", "Short Term Investments"]))
-    d.cash_and_equivalents = _latest(_row(bal, ["Cash Cash Equivalents And Short Term Investments", "Cash And Cash Equivalents"]))
-    d.debt = _latest(_row(bal, ["Total Debt"]))
+    if cands is not None:
+        cands += _yahoo_cands(t, f"https://finance.yahoo.com/quote/{sym}/financials")
     pct = _num(info.get("heldPercentInsiders"))
     d.promoter_holding_pct = None if pct is None else round(pct * 100, 2)
     d.sources.append(f"https://finance.yahoo.com/quote/{sym}")
@@ -252,22 +270,31 @@ def _listed(sym: str, d: CompanyOnePager, notes: List[str]) -> None:
     notes.append(f"Yahoo Finance ticker {sym}; statements in INR, converted to Rs. crore.")
 
 
-def _apply_screener(sc, d: CompanyOnePager) -> None:
-    """Screener consolidated figures (already Rs. crore) override Yahoo's."""
-    def yf(m):
-        return [YearFigure(fiscal_year=y, value_cr=m[y], basis="Consolidated", source_url=sc.url)
-                for y in sorted(m, reverse=True)[:3]]
-    if sc.sales:
-        d.revenue = yf(sc.sales)
-    if sc.profit:
-        d.pat = yf(sc.profit)
-    for attr, val in (("net_worth", sc.net_worth), ("debt", sc.borrowings), ("non_current_investments", sc.investments)):
+def _apply_screener(sc, d: CompanyOnePager, cands: List[Cand]) -> None:
+    """Screener consolidated figures (already Rs. crore) become candidates; priority is decided later."""
+    for field, m in (("revenue", sc.sales), ("pat", sc.profit)):
+        for y in sorted(m, reverse=True)[:3]:
+            cands.append(Cand(field, y, m[y], "Screener", sc.url, "Consolidated", 0, "Screener consolidated table"))
+    for field, val in (("net_worth", sc.net_worth), ("debt", sc.borrowings), ("non_current_investments", sc.investments)):
         if val:
-            setattr(d, attr, Amount(value_cr=val[1], period=val[0], basis="Consolidated", source_url=sc.url))
+            cands.append(Cand(field, val[0], val[1], "Screener", sc.url, "Consolidated", 0, "Screener consolidated balance sheet"))
     d.sources.append(sc.url)
-    d.field_urls.update({k: sc.url for k in ("revenue", "pat", "net_worth", "debt", "non_current_investments")})
-    d.field_sources.update({k: "Screener (consolidated)" for k in ("revenue", "pat", "net_worth", "debt", "non_current_investments")
-                            if getattr(d, k)})
+
+
+FIELD_LABELS = {"about": "About", "corporate_address": "Corporate address", "authorised_capital": "Authorised capital",
+                "paid_up_capital": "Paid-up capital", "directors": "Directors", "products_and_services": "Products & services",
+                "factories": "Factories", "group_companies": "Group companies", "revenue": "Revenue", "pat": "PAT",
+                "net_worth": "Net worth", "debt": "Debt", "cash": "Cash & equivalents", "non_current_investments": "Non-current investments",
+                "current_investments": "Current investments"}
+
+
+def _trail_from(d: CompanyOnePager, attempts: List[tuple]) -> List[dict]:
+    rows = []
+    for fields, source, url, ok, note in attempts:
+        for f in fields:
+            rows.append({"field": FIELD_LABELS.get(f, f), "source": source, "url": url,
+                         "result": ("FOUND: " if ok else "NOT FOUND: ") + note})
+    return rows
 
 
 def _try(d: CompanyOnePager, label: str, fn, *args, default=None):
@@ -292,12 +319,18 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
 
     from . import http as _h
     _h.drain()
+    _h.drain_queries()
+    cands: List[Cand] = []
+    attempts: List[tuple] = []  # (fields, source, url, ok, note)
     res = CompanyResult(request=req)
     d = CompanyOnePager(company_name=req.name, confidence="Low")
     notes: List[str] = []
     try:
         # 1. Zauba: authorised + paid-up capital, CIN, listing status, directors
         z = _try(d, "Zauba", zauba.fetch, req.name)
+        attempts.append((["authorised_capital", "paid_up_capital", "directors"], "Zauba Corp",
+                         z.url if z else f"https://www.zaubacorp.com/companysearchresults/{quote_plus(req.name)}", bool(z),
+                         "page read" if z else "blocked / not found (bot protection) - paste the page in the app"))
         if z:
             d.cin = z.cin
             d.authorised_capital = Amount(value_cr=z.authorised_cr, basis="Zauba Corp", source_url=z.url)
@@ -318,6 +351,9 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                     d.field_urls.update({"authorised_capital": src, "paid_up_capital": src})
                 d.sources.append(src or "")
             d.directors = _try(d, "Director snippets", directors_from_snippets, req.name, default=[])
+            gq = "https://www.google.com/search?q=" + quote_plus(f'"{req.name}" authorised capital paid up capital')
+            attempts.append((["authorised_capital", "paid_up_capital"], "Search snippet", gq, auth is not None or paid is not None,
+                             "quoted in a search result - verify" if (auth is not None or paid is not None) else "no snippet quoted the capital"))
             if d.directors:
                 d.field_sources["directors"] = "Search snippet"
             d.data_gaps.append("Zauba blocked/not found - capital and directors came from search snippets (verify) or are missing: "
@@ -341,11 +377,14 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 notes.append(f"Ticker lookup failed: {e}")
         if sym:
             try:
-                _try(d, "Yahoo Finance", _listed, sym, d, notes)
+                _try(d, "Yahoo Finance", _listed, sym, d, notes, cands)
                 d.confidence = "Medium" if d.revenue else d.confidence
             except Exception as e:
                 d.data_gaps.append(f"Yahoo Finance fetch failed for {sym}: {e}")
             sc = _try(d, "Screener page", screener.fetch, sym.split(".")[0])
+            attempts.append((["revenue", "pat", "net_worth", "debt", "non_current_investments"], "Screener",
+                             f"https://www.screener.in/company/{sym.split('.')[0]}/consolidated/", bool(sc),
+                             "consolidated tables read" if sc else "page not reachable"))
             if sc:
                 d.sources += sc.annual_reports
                 if sc.annual_reports:
@@ -355,7 +394,7 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                     d.field_sources["about"] = "Screener"
                 if sc.website and not d.website:
                     d.website = sc.website
-                _try(d, "Screener parse", _apply_screener, sc, d)
+                _try(d, "Screener parse", _apply_screener, sc, d, cands)
                 d.confidence = "High" if d.revenue else d.confidence
                 if sc.rating_links:
                     d.sources += sc.rating_links
@@ -376,6 +415,13 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
         site = _try(d, "Company website", website.fetch, site_url) if site_url else None
         if site:
             d.website = site.url
+            for kind, flds in (("about", ["about"]), ("contact", ["corporate_address"]), ("products", ["products_and_services"]),
+                               ("plants", ["factories"]), ("board", ["directors"]), ("group", ["group_companies"])):
+                u = site.page_urls.get(kind) or (site.url if kind in ("about", "contact") else "")
+                have = {"about": site.about, "contact": site.address, "products": site.products, "plants": site.factories,
+                        "board": site.directors, "group": site.group}[kind]
+                attempts.append((flds, "Company website", u or site.url, bool(have),
+                                 "read from page" if have else ("page opened, nothing recognised" if site.page_urls.get(kind) else "no such page found on the site")))
             d.sources += site.pages[:5]
             for attr, val in (("about", site.about), ("corporate_address", site.address),
                               ("products_and_services", site.products), ("factories", site.factories)):
@@ -400,9 +446,40 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
             if not d.directors:
                 d.data_gaps.append("Directors: not on Zauba or website Board page; use the search links below or ChatGPT prompt.")
         else:
+            attempts.append((["about", "corporate_address", "products_and_services", "factories", "directors", "group_companies"],
+                             "Company website", site_url or "", False, "website not found or not reachable"))
             d.data_gaps.append(f"Company website {'not reachable' if site_url else 'not found'}: about/address/products/factories need manual entry.")
+        # 3b. Numbers, priority 1: company's own pages and annual reports (then Screener already collected, then others)
+        from . import fin_extract, numbers
+        nfields = ["revenue", "pat", "net_worth", "debt", "cash", "non_current_investments", "current_investments"]
+        if site:
+            for url, html in site.fin_html:
+                got = _try(d, "Website financial page", fin_extract.from_html, html, "Company website", url, default=[])
+                cands += got
+                attempts.append((nfields, "Company website", url, bool(got), f"{len(got)} numbers read" if got else "page read, no labelled numbers with a readable year+unit"))
+            if not site.fin_html:
+                attempts.append((nfields, "Company website", site.page_urls.get("investor") or site.url, False, "no investor/financial-results page found"))
+        pdfs = list(dict.fromkeys((site.annual_reports if site else []) + ((sc.annual_reports if sc else []) if sym else [])))
+        if READ_PDFS and pdfs:
+            for url in pdfs[:2]:
+                got = _try(d, "Annual report PDF", fin_extract.from_pdf, url, default=[])
+                cands += got
+                attempts.append((nfields, "Annual report PDF", url, bool(got), f"{len(got)} numbers read" if got else "no readable numbers (scanned/odd layout/too big)"))
+        elif pdfs:
+            attempts.append((nfields, "Annual report PDF", pdfs[0], False, "skipped (PDF reading switched off)"))
+        else:
+            attempts.append((nfields, "Annual report PDF", "", False, "no annual-report link found on the website or Screener"))
+        if not any(c.field == "revenue" for c in cands):  # nothing structured: try quoted figures in search results
+            for r in _search(f'"{d.company_name}" revenue net profit crore FY', 8):
+                cands += fin_extract.from_snippet(f"{r.get('title','')}. {r.get('body','')}", r.get("href", ""))
+        numbers.resolve(cands, d)
+        if cands and d.revenue and d.confidence != "High":
+            d.confidence = "High" if any(y.source in ("Company website", "Annual report PDF", "Screener") for y in d.revenue) else "Medium"
+        if not d.revenue:
+            d.data_gaps.append("Revenue/PAT not found from website, annual report, Screener or other sources - use the links below.")
         from . import wiki
         w = _try(d, "Wikipedia/Wikidata", wiki.fetch, d.company_name, lambda t: similar(d.company_name, t) >= 0.55)
+        attempts.append((["about", "group_companies"], "Wikipedia/Wikidata", w.url if w else "https://en.wikipedia.org/w/index.php?search=" + quote_plus(d.company_name), bool(w), "article found" if w else "no matching article"))
         if w:
             d.sources.append(w.url)
             if w.about and not d.about:
@@ -452,6 +529,9 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
             d.field_urls["linkedin"] = d.meetup_person.linkedin_url
         d.chatgpt_prompt = gap_prompt(d, req.meetup_person or "")
         from . import http
+        from urllib.parse import quote_plus as qp
+        d.searches = [{"query": q, "url": "https://www.google.com/search?q=" + qp(q)} for q in http.drain_queries()]
+        d.trail += _trail_from(d, attempts)
         d.source_log = http.drain()
         res.data, res.notes = d, "\n".join(notes)
     except Exception as e:

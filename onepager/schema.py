@@ -15,6 +15,9 @@ from pydantic import BaseModel, Field
 class Amount(BaseModel):
     """A single money figure, always in Rs. crore."""
 
+    source: Optional[str] = Field(None, description="Which source supplied it, e.g. 'Company website', 'Screener'.")
+    evidence: Optional[str] = Field(None, description="The raw text line the number was read from, if parsed from a document.")
+
     value_cr: Optional[float] = Field(
         None, description="Value in Rs. crore. null if not found. Never guess."
     )
@@ -28,6 +31,8 @@ class Amount(BaseModel):
 
 
 class YearFigure(BaseModel):
+    source: Optional[str] = None
+    evidence: Optional[str] = None
     fiscal_year: str = Field(
         description="Indian fiscal year label, e.g. 'FY2026' meaning Apr 2025 - Mar 2026."
     )
@@ -115,6 +120,8 @@ class CompanyOnePager(BaseModel):
     )
     field_urls: dict = Field(default_factory=dict, description="field name -> URL it came from.")
     search_links: dict = Field(default_factory=dict, description="label -> ready-made search/verify URL.")
+    trail: List[dict] = Field(default_factory=list, description="Per field: every source tried, its link and result.")
+    searches: List[dict] = Field(default_factory=list, description="Web searches run: query + clickable Google link.")
     source_log: List[str] = Field(default_factory=list, description="What each web request returned (for debugging).")
     chatgpt_prompt: str = Field("", description="Copy-paste prompt for fields free sources could not fill.")
     confidence: str = Field(

@@ -81,3 +81,35 @@ def get_browser(url: str, timeout_ms: int = 25000) -> Optional[str]:
     except Exception as e:
         log(f"FAIL browser {type(e).__name__} {url}")
         return None
+
+
+def get_bytes(url: str, timeout: int = 60, max_mb: int = 45) -> Optional[bytes]:
+    """Download a binary file (PDF) with a size cap."""
+    try:
+        with requests.get(url, headers={"User-Agent": UA}, timeout=timeout, stream=True) as r:
+            if r.status_code != 200:
+                log(f"FAIL {r.status_code} {url}")
+                return None
+            buf = bytearray()
+            for chunk in r.iter_content(1 << 20):
+                buf += chunk
+                if len(buf) > max_mb << 20:
+                    log(f"SKIP file larger than {max_mb} MB {url}")
+                    return None
+            log(f"OK   200 {url} ({len(buf) >> 10} KB)")
+            return bytes(buf)
+    except requests.RequestException as e:
+        log(f"FAIL {type(e).__name__} {url}")
+        return None
+
+
+def record_query(q: str) -> None:
+    if not hasattr(_tl, "queries"):
+        _tl.queries = []
+    if q not in _tl.queries:
+        _tl.queries.append(q)
+
+
+def drain_queries() -> List[str]:
+    qs, _tl.queries = getattr(_tl, "queries", []), []
+    return qs
