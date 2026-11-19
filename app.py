@@ -40,43 +40,45 @@ def bullets(xs) -> str:
     return NF if not xs else "\n".join(f"- {x}" for x in xs)
 
 
-def row(label: str, value: str, src: str = ""):
-    c1, c2, c3 = st.columns([1.2, 4, 1.1])
+def row(label: str, value: str, src: str = "", url: str = ""):
+    c1, c2, c3 = st.columns([1.2, 4, 1.3])
     c1.markdown(f"**{label}**")
     c2.markdown(value or NF)
-    if src:
+    if url:
+        c3.markdown(f"[{src or 'source'} ↗]({url})")
+    elif src:
         c3.caption(src)
 
 
 def render(d, i: int):
-    fs = d.field_sources
+    fs, fu = d.field_sources, d.field_urls
     if d.red_flags:
         st.error("Red flags: " + " | ".join(d.red_flags))
-    row("About", d.about or "", fs.get("about", ""))
-    row("Corporate Address", d.corporate_address or "", fs.get("corporate_address", ""))
+    row("About", d.about or "", fs.get("about", ""), fu.get("about", ""))
+    row("Corporate Address", d.corporate_address or "", fs.get("corporate_address", ""), fu.get("corporate_address", ""))
     row("Listed / Unlisted", d.listed_status or "")
-    row("Authorised Capital", fmt_amt(d.authorised_capital), fs.get("authorised_capital", ""))
-    row("Paid-up Capital", fmt_amt(d.paid_up_capital), fs.get("paid_up_capital", ""))
+    row("Authorised Capital", fmt_amt(d.authorised_capital), fs.get("authorised_capital", ""), fu.get("authorised_capital", ""))
+    row("Paid-up Capital", fmt_amt(d.paid_up_capital), fs.get("paid_up_capital", ""), fu.get("paid_up_capital", ""))
     if d.market_cap.value_cr is not None:
         row("Market Cap (extra)", fmt_amt(d.market_cap), "Yahoo")
-    row("Net Worth", fmt_amt(d.net_worth), fs.get("net_worth", ""))
+    row("Net Worth", fmt_amt(d.net_worth), fs.get("net_worth", ""), fu.get("net_worth", ""))
     row("Investment Detail", f"Non-Current: {fmt_amt(d.non_current_investments)}  \nCurrent: {fmt_amt(d.current_investments)}")
-    row("Revenue (3 yrs)", fmt_years(d.revenue), fs.get("revenue", ""))
-    row("PAT (3 yrs)", fmt_years(d.pat), fs.get("pat", ""))
+    row("Revenue (3 yrs)", fmt_years(d.revenue), fs.get("revenue", ""), fu.get("revenue", ""))
+    row("PAT (3 yrs)", fmt_years(d.pat), fs.get("pat", ""), fu.get("pat", ""))
     row("Cash & Equivalents", fmt_amt(d.cash_and_equivalents))
-    row("Debt", fmt_amt(d.debt), fs.get("debt", ""))
+    row("Debt", fmt_amt(d.debt), fs.get("debt", ""), fu.get("debt", ""))
     row("Long Term Rating", fmt_rating(d.long_term_rating))
     row("Short Term Rating", fmt_rating(d.short_term_rating))
     row("Directors", bullets([f"{p.name}" + (f" - {p.designation}" if p.designation else "") + (f" (DIN {p.din})" if p.din else "")
-                              for p in d.directors]), fs.get("directors", ""))
-    row("Products & Services", bullets(d.products_and_services), fs.get("products_and_services", ""))
+                              for p in d.directors]), fs.get("directors", ""), fu.get("directors", ""))
+    row("Products & Services", bullets(d.products_and_services), fs.get("products_and_services", ""), fu.get("products_and_services", ""))
     mp = d.meetup_person
     row("Meetup Person", mp.name or "")
     row("Designation", mp.designation or "")
-    row("LinkedIn", f"[{mp.linkedin_url}]({mp.linkedin_url})" if mp.linkedin_url else "")
+    row("LinkedIn", f"[{mp.linkedin_url}]({mp.linkedin_url})" if mp.linkedin_url else "", "")
     row("LinkedIn History", bullets(mp.career_history))
-    row("Factories", bullets(d.factories), fs.get("factories", ""))
-    row("Group Companies", bullets(d.group_companies))
+    row("Factories", bullets(d.factories), fs.get("factories", ""), fu.get("factories", ""))
+    row("Group Companies", bullets(d.group_companies), fs.get("group_companies", ""), fu.get("group_companies", ""))
     if d.recent_news:
         with st.expander("Recent news"):
             st.markdown(bullets(d.recent_news))
@@ -185,6 +187,14 @@ if ok:
             st.download_button("Download this one-pager (.docx)", build_docx(d), f"{d.company_name}.docx", key=f"dl{i}")
             with st.expander("Fill / correct missing fields (flows into the download)"):
                 edit(d, i)
+            with st.expander("Search it yourself - links for every field", expanded=bool(d.data_gaps)):
+                for label, url in d.search_links.items():
+                    st.markdown(f"- [{label}]({url})")
+                if d.field_urls.get("annual_report"):
+                    st.markdown(f"- [Annual report (found)]({d.field_urls['annual_report']})")
+            with st.expander("Every source page used"):
+                for u in dict.fromkeys(x for x in d.sources if x):
+                    st.markdown(f"- {u}")
             if any("Zauba" in g for g in d.data_gaps) or d.authorised_capital.value_cr is None:
                 with st.expander("Zauba blocked? Paste the page here (fixes capital + directors in 30 seconds)", expanded=True):
                     st.markdown(f"1. Open [Zauba search for {d.company_name}](https://www.zaubacorp.com/companysearchresults/{quote_plus(d.company_name)}) "

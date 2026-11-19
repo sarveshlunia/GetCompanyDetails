@@ -33,6 +33,13 @@ Results show on screen per company (tabs), each value tagged with its source; re
 "Fill / correct" box to type missing values - they flow into the Word/Excel download. The "Debug log" shows what every
 web request returned; send it to the developer when fields come back empty.
 
+## Deeper sources and links
+- Company website is crawled two levels deep (About, Investors, Board/Leadership, Subsidiaries, Plants, Annual report).
+- Wikipedia + Wikidata supply description, parent company and subsidiaries for notable companies.
+- Screener supplies annual-report and rating-document links.
+- Every value shows a clickable source link; each company has a "Search it yourself" list of ready-made links
+  (Zauba, Tofler, MCA, NSE/BSE, rating agencies, LinkedIn, site-specific searches).
+
 ## Blunt limits
 - Zauba is bot-protected and Screener/company sites change HTML; scrapers are best-effort and written against
   fixtures, not verified live. If one is blocked you get a gap + manual link, not a crash.

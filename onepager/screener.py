@@ -22,6 +22,7 @@ class ScreenerData:
     borrowings: Optional[tuple] = None
     investments: Optional[tuple] = None
     rating_links: List[str] = field(default_factory=list)
+    annual_reports: List[str] = field(default_factory=list)
     name: Optional[str] = None
     about: Optional[str] = None
     website: Optional[str] = None
@@ -92,6 +93,13 @@ def parse(html: str, url: str = "") -> ScreenerData:
             if ul:
                 s.rating_links = [("https://www.screener.in" + a["href"]) if a["href"].startswith("/") else a["href"]
                                   for a in ul.find_all("a", href=True)][:5]
+            break
+    for h in soup.find_all(["h3", "h4", "h5"]):
+        if "annual report" in h.get_text(" ", strip=True).lower():
+            ul = h.find_next("ul")
+            if ul:
+                s.annual_reports = [("https://www.screener.in" + a["href"]) if a["href"].startswith("/") else a["href"]
+                                    for a in ul.find_all("a", href=True)][:3]
             break
     return s
 

@@ -265,6 +265,7 @@ def _apply_screener(sc, d: CompanyOnePager) -> None:
         if val:
             setattr(d, attr, Amount(value_cr=val[1], period=val[0], basis="Consolidated", source_url=sc.url))
     d.sources.append(sc.url)
+    d.field_urls.update({k: sc.url for k in ("revenue", "pat", "net_worth", "debt", "non_current_investments")})
     d.field_sources.update({k: "Screener (consolidated)" for k in ("revenue", "pat", "net_worth", "debt", "non_current_investments")
                             if getattr(d, k)})
 
@@ -306,12 +307,15 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
             d.listed_status = z.listing_status
             d.sources.append(z.url)
             d.field_sources.update({"authorised_capital": "Zauba", "paid_up_capital": "Zauba", "directors": "Zauba"})
+            d.field_urls.update({k: z.url for k in ("authorised_capital", "paid_up_capital", "directors")})
         else:
             auth, paid, src = _try(d, "Capital snippets", capital_from_snippets, req.name, default=(None, None, None))
             if auth is not None or paid is not None:
                 d.authorised_capital = Amount(value_cr=auth, basis="Search snippet - verify", source_url=src)
                 d.paid_up_capital = Amount(value_cr=paid, basis="Search snippet - verify", source_url=src)
                 d.field_sources.update({"authorised_capital": "Search snippet", "paid_up_capital": "Search snippet"})
+                if src:
+                    d.field_urls.update({"authorised_capital": src, "paid_up_capital": src})
                 d.sources.append(src or "")
             d.directors = _try(d, "Director snippets", directors_from_snippets, req.name, default=[])
             if d.directors:
@@ -343,6 +347,9 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 d.data_gaps.append(f"Yahoo Finance fetch failed for {sym}: {e}")
             sc = _try(d, "Screener page", screener.fetch, sym.split(".")[0])
             if sc:
+                d.sources += sc.annual_reports
+                if sc.annual_reports:
+                    d.field_urls["annual_report"] = sc.annual_reports[0]
                 if sc.about and not d.about:
                     d.about = sc.about
                     d.field_sources["about"] = "Screener"
@@ -375,10 +382,36 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
                 if val:
                     setattr(d, attr, val)
                     d.field_sources[attr] = "Company website"
+            pu = site.page_urls
+            for attr, kind in (("about", "about"), ("corporate_address", "contact"), ("products_and_services", "products"), ("factories", "plants")):
+                if d.field_sources.get(attr) == "Company website":
+                    d.field_urls[attr] = pu.get(kind) or pu.get("home") or site.url
+            if site.directors and not d.directors:
+                d.directors = [Person(name=n, designation=des) for n, des in site.directors]
+                d.field_sources["directors"] = "Company website (verify)"
+                d.field_urls["directors"] = pu.get("board", site.url)
+            if site.group:
+                d.group_companies = site.group
+                d.field_sources["group_companies"] = "Company website"
+                d.field_urls["group_companies"] = pu.get("group", site.url)
+            if site.annual_reports:
+                d.sources += site.annual_reports
+                d.field_urls.setdefault("annual_report", site.annual_reports[0])
             if not d.directors:
-                d.data_gaps.append("Directors: not on Zauba; check the website's Board/Leadership page, else ChatGPT prompt below.")
+                d.data_gaps.append("Directors: not on Zauba or website Board page; use the search links below or ChatGPT prompt.")
         else:
             d.data_gaps.append(f"Company website {'not reachable' if site_url else 'not found'}: about/address/products/factories need manual entry.")
+        from . import wiki
+        w = _try(d, "Wikipedia/Wikidata", wiki.fetch, d.company_name, lambda t: similar(d.company_name, t) >= 0.55)
+        if w:
+            d.sources.append(w.url)
+            if w.about and not d.about:
+                d.about, d.field_sources["about"], d.field_urls["about"] = w.about, "Wikipedia", w.url
+            extra = [f"{x} (Wikidata: subsidiary)" for x in w.subsidiaries] + [f"{x} (Wikidata: parent)" for x in w.parent]
+            if extra:
+                d.group_companies = (d.group_companies or []) + [e for e in extra if e not in (d.group_companies or [])]
+                d.field_sources.setdefault("group_companies", "Wikidata")
+                d.field_urls.setdefault("group_companies", w.url)
         if not d.about:
             for r in _search(f'"{d.company_name}" company profile India what does it do', 5):
                 host = r.get("href", "")
@@ -413,6 +446,10 @@ def run_company(req: CompanyRequest, client=None) -> CompanyResult:
 
         d.group_companies = d.group_companies or []
         d.data_gaps.append("Group companies: no structured free source.")
+        from .links import search_links
+        d.search_links = search_links(d.company_name, req.meetup_person, sym, d.website)
+        if d.meetup_person.linkedin_url:
+            d.field_urls["linkedin"] = d.meetup_person.linkedin_url
         d.chatgpt_prompt = gap_prompt(d, req.meetup_person or "")
         from . import http
         d.source_log = http.drain()

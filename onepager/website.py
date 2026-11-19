@@ -25,7 +25,12 @@ PAGE_KEYS = {
     "contact": ("contact", "locat", "reach-us", "address"),
     "products": ("product", "service", "solution", "offering", "business", "portfolio"),
     "plants": ("plant", "factory", "factories", "manufactur", "facilit", "infrastructure", "operations"),
+    "board": ("board-of-director", "board_of_director", "board of director", "directors", "leadership", "governance", "management-team", "our-team"),
+    "group": ("subsidiar", "group-compan", "group compan", "our-group", "associate", "joint-venture", "group-structure"),
+    "investor": ("investor", "annual-report", "annual report", "shareholder"),
 }
+TITLE_RE = re.compile(r"\b(?:Mr|Ms|Mrs|Dr|Prof|Shri|Smt|Sri)\.?\s+([A-Z][A-Za-z.\-']+(?:\s+[A-Z][A-Za-z.\-']+){1,3})")
+ENTITY_RE = re.compile(r"\b(Ltd|Limited|Pvt|Private|LLP|Inc|Corporation|Corp|GmbH|PLC|Industries|Enterprises)\b\.?", re.I)
 PLANT_RE = re.compile(r"\b(plant|factory|manufacturing (?:unit|facility|plant)|facility|unit[- ]?[ivx\d]+|works)\b", re.I)
 
 
@@ -37,6 +42,10 @@ class SiteData:
     products: List[str] = field(default_factory=list)
     factories: List[str] = field(default_factory=list)
     pages: List[str] = field(default_factory=list)
+    directors: List[tuple] = field(default_factory=list)   # (name, designation)
+    group: List[str] = field(default_factory=list)
+    annual_reports: List[str] = field(default_factory=list)
+    page_urls: dict = field(default_factory=dict)          # kind -> url
 
 
 def pick_site(results: List[dict]) -> Optional[str]:
@@ -92,12 +101,60 @@ def parse_page(kind: str, html: str, base: str, out: SiteData) -> None:
                     and t not in out.products:
                 out.products.append(t)
         out.products = out.products[:25]
+    if kind == "board":
+        _board(soup, out)
+    if kind == "group":
+        _group(soup, out)
+    if kind in ("investor", "about", "home"):
+        _annual(soup, base, out)
     if kind == "plants":
         for tag in soup.find_all(["h2", "h3", "h4", "li", "p"]):
             t = _clean(tag.get_text(" "))
             if 8 <= len(t) <= 200 and PLANT_RE.search(t) and t not in out.factories:
                 out.factories.append(t)
         out.factories = out.factories[:12]
+
+
+def _board(soup: BeautifulSoup, out: SiteData) -> None:
+    seen = {n for n, _ in out.directors}
+    for tag in soup.find_all(["h2", "h3", "h4", "h5", "strong", "b", "p", "li", "span", "div"]):
+        if tag.find(["h2", "h3", "h4", "h5", "li", "p", "div"]):
+            continue  # only leaf-ish elements
+        t = _clean(tag.get_text(" "))
+        if not (6 <= len(t) <= 160):
+            continue
+        m = TITLE_RE.search(t)
+        if not m:
+            continue
+        name = m.group(1).strip(" .,-")
+        if name in seen:
+            continue
+        rest = _clean(t[m.end():].strip(" -,:|"))
+        if not rest:
+            sib = tag.find_next(string=lambda x: x and x.strip() and x.strip() != t)
+            rest = _clean(sib)[:80] if sib else ""
+        des = rest if 2 <= len(rest) <= 80 and not TITLE_RE.search(rest) else None
+        seen.add(name)
+        out.directors.append((name, des))
+    out.directors = out.directors[:15]
+
+
+def _group(soup: BeautifulSoup, out: SiteData) -> None:
+    for tag in soup.find_all(["li", "td", "h4", "h5", "p"]):
+        t = _clean(tag.get_text(" "))
+        if 4 <= len(t) <= 90 and ENTITY_RE.search(t) and t not in out.group:
+            out.group.append(t)
+    out.group = out.group[:30]
+
+
+def _annual(soup: BeautifulSoup, base: str, out: SiteData) -> None:
+    for a in soup.find_all("a", href=True):
+        txt = (a.get_text(" ") + " " + a["href"]).lower()
+        if "annual" in txt and "report" in txt:
+            u = urljoin(base, a["href"])
+            if u not in out.annual_reports:
+                out.annual_reports.append(u)
+    out.annual_reports = out.annual_reports[:4]
 
 
 def _links(html: str, base: str) -> dict:
@@ -121,9 +178,24 @@ def fetch(site: str) -> Optional[SiteData]:
         return None
     out = SiteData(url=site, pages=[site])
     parse_page("home", home, site, out)
-    for kind, url in _links(home, site).items():
+    out.page_urls["home"] = site
+    queue = list(_links(home, site).items())
+    done = set()
+    fetched = 0
+    while queue and fetched < 10:
+        kind, url = queue.pop(0)
+        if kind in done or url == site:
+            continue
+        done.add(kind)
         html = get(url)
-        if html:
-            out.pages.append(url)
-            parse_page(kind, html, url, out)
+        if not html:
+            continue
+        fetched += 1
+        out.pages.append(url)
+        out.page_urls[kind] = url
+        parse_page(kind, html, url, out)
+        # second level: pages like About / Investors often link to Board, Subsidiaries, Plants
+        for k2, u2 in _links(html, url).items():
+            if k2 not in done and k2 not in dict(queue):
+                queue.append((k2, u2))
     return out

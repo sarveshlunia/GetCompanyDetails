@@ -113,6 +113,8 @@ class CompanyOnePager(BaseModel):
     data_gaps: List[str] = Field(
         default_factory=list, description="Fields that could not be found or verified, and why."
     )
+    field_urls: dict = Field(default_factory=dict, description="field name -> URL it came from.")
+    search_links: dict = Field(default_factory=dict, description="label -> ready-made search/verify URL.")
     source_log: List[str] = Field(default_factory=list, description="What each web request returned (for debugging).")
     chatgpt_prompt: str = Field("", description="Copy-paste prompt for fields free sources could not fill.")
     confidence: str = Field(
