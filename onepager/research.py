@@ -226,7 +226,7 @@ def _yahoo_cands(t, url: str) -> List[Cand]:
         for ts in sorted(row, reverse=True)[:n]:
             cr = _cr(row[ts])
             if cr is not None:
-                out.append(Cand(field, _fy(ts), cr, "Yahoo Finance", url, "Unspecified", 0, "Yahoo Finance statement row"))
+                out.append(Cand(field, _fy(ts), cr, "Yahoo Finance", url, "Unspecified", 0, "Yahoo Finance statement row", "api"))
 
     add("revenue", inc, ["Total Revenue", "Operating Revenue"], 3)
     add("pat", inc, ["Net Income", "Net Income Common Stockholders"], 3)
@@ -274,10 +274,10 @@ def _apply_screener(sc, d: CompanyOnePager, cands: List[Cand]) -> None:
     """Screener consolidated figures (already Rs. crore) become candidates; priority is decided later."""
     for field, m in (("revenue", sc.sales), ("pat", sc.profit)):
         for y in sorted(m, reverse=True)[:3]:
-            cands.append(Cand(field, y, m[y], "Screener", sc.url, "Consolidated", 0, "Screener consolidated table"))
-    for field, val in (("net_worth", sc.net_worth), ("debt", sc.borrowings), ("non_current_investments", sc.investments)):
+            cands.append(Cand(field, y, m[y], "Screener", sc.url, "Consolidated", 0, "Screener consolidated table", "api"))
+    for field, val in (("net_worth", sc.net_worth), ("debt", sc.borrowings), ("non_current_investments", sc.investments), ("cash", sc.cash)):
         if val:
-            cands.append(Cand(field, val[0], val[1], "Screener", sc.url, "Consolidated", 0, "Screener consolidated balance sheet"))
+            cands.append(Cand(field, val[0], val[1], "Screener", sc.url, "Consolidated", 0, "Screener consolidated balance sheet", "api"))
     d.sources.append(sc.url)
 
 

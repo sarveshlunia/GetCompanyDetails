@@ -30,13 +30,15 @@ def fmt_amt(a: Amount) -> str:
     if a.value_cr is None:
         return NF
     extra = ", ".join(x for x in (a.basis, a.period) if x)
-    return f"Rs. {a.value_cr:,.2f} Cr" + (f"  ({extra})" if extra else "") + _src(a.source, a.source_url)
+    return (f"Rs. {a.value_cr:,.2f} Cr" + (f"  ({extra})" if extra else "") + _src(a.source, a.source_url)
+            + (f"  \n:grey[{a.verify}]" if a.verify else ""))
 
 
 def fmt_years(items) -> str:
     if not items:
         return NF
     return "  \n".join(f"**{y.fiscal_year}**: Rs. {y.value_cr:,.2f} Cr ({y.basis or '-'})" + _src(y.source, y.source_url)
+                       + (f"  \n:grey[{y.verify}]" if y.verify else "")
                        for y in sorted(items, key=lambda y: y.fiscal_year, reverse=True)[:3])
 
 
@@ -202,6 +204,12 @@ if ok:
                     st.markdown(f"- [{label}]({url})")
                 if d.field_urls.get("annual_report"):
                     st.markdown(f"- [Annual report (found)]({d.field_urls['annual_report']})")
+            if d.verification:
+                with st.expander(f"Cross-check vs Screener ({len(d.verification)} comparisons)", expanded=any(v["status"] == "MISMATCH" for v in d.verification)):
+                    vdf = pd.DataFrame(d.verification)
+                    st.dataframe(vdf, hide_index=True, column_config={"evidence": st.column_config.TextColumn("raw line read", width="large")})
+                    st.caption("MATCH = company statement and Screener agree, statement figure shown. MISMATCH = Screener figure shown; "
+                               "open the annual report page in the evidence to see which is right.")
             if d.trail:
                 with st.expander(f"How each field was searched ({len(d.trail)} attempts) - source, link, result", expanded=False):
                     df = pd.DataFrame(d.trail)[["field", "source", "url", "result"]].sort_values(["field", "source"])

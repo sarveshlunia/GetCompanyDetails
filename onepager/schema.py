@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 class Amount(BaseModel):
     """A single money figure, always in Rs. crore."""
 
+    verify: Optional[str] = Field(None, description="Cross-check against Screener: matches / differs / not cross-checked.")
     source: Optional[str] = Field(None, description="Which source supplied it, e.g. 'Company website', 'Screener'.")
     evidence: Optional[str] = Field(None, description="The raw text line the number was read from, if parsed from a document.")
 
@@ -31,6 +32,7 @@ class Amount(BaseModel):
 
 
 class YearFigure(BaseModel):
+    verify: Optional[str] = None
     source: Optional[str] = None
     evidence: Optional[str] = None
     fiscal_year: str = Field(
@@ -120,6 +122,7 @@ class CompanyOnePager(BaseModel):
     )
     field_urls: dict = Field(default_factory=dict, description="field name -> URL it came from.")
     search_links: dict = Field(default_factory=dict, description="label -> ready-made search/verify URL.")
+    verification: List[dict] = Field(default_factory=list, description="Statement value vs Screener value per metric.")
     trail: List[dict] = Field(default_factory=list, description="Per field: every source tried, its link and result.")
     searches: List[dict] = Field(default_factory=list, description="Web searches run: query + clickable Google link.")
     source_log: List[str] = Field(default_factory=list, description="What each web request returned (for debugging).")

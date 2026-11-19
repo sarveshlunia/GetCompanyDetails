@@ -29,6 +29,7 @@ class Cand:
     basis: str = "Unspecified"      # Consolidated | Standalone | Unspecified
     label_rank: int = 0
     evidence: str = ""
+    kind: str = "loose"             # statement (read from Balance Sheet / P&L) | loose (highlights table) | api
 
 
 # ---- labels (rank = preference, lower first) ---------------------------------------------------
@@ -100,6 +101,151 @@ def numbers_after(line: str, label_end: int) -> List[float]:
     return vals
 
 
+def _label_nums(line: str):
+    """Split 'Revenue from operations 24 1,53,670 1,46,767' into ('revenue from operations', [24, 153670, 146767])."""
+    m = re.search(r"\s\(?-?\d[\d,]*(?:\.\d+)?\)?%?(?:\s|$)", " " + line)
+    if not m:
+        return None, []
+    cut = max(m.start() - 1, 0)
+    label = line[:cut].strip(" :-–—|")
+    return label, numbers_after(line, cut)
+
+
+_ENUM = re.compile(r"^(?:\(?[a-z]{1,2}\)|\(?[ivx]{1,4}\)|[ivx]{1,4}[\.\)]?|[a-z][\.\)]|\d{1,2}[\.\)])\s+", re.I)
+_BORROW = re.compile(r"^(?:borrowings?|long[- ]term borrowings?|short[- ]term borrowings?|current maturities of long[- ]term (?:debt|borrowings?)|"
+                     r"debt securities|subordinated liabilities|non[- ]current borrowings?|current borrowings?)\b", re.I)
+
+
+def parse_statements(lines: List[str], source: str, url: str, page_label: str = "") -> List[Cand]:
+    """Strict reader for the consolidated Balance Sheet and Statement of Profit & Loss.
+
+    Needs the statement heading, a year header and a unit; tracks the section (BS / P&L / cash-flow) and the
+    sub-block (non-current assets, current assets, liabilities, equity) so that 'Investments' and 'Borrowings'
+    land in the right place. Builds:
+      net worth = equity share capital + other equity   (else equity attributable to owners, else total equity)
+      debt      = total borrowings, else the sum of the borrowing lines (non-current + current + current maturities)
+      investments = 'Investments' under non-current assets / under current assets
+      cash        = 'Cash and cash equivalents' under current assets;  revenue / PAT from the P&L.
+    """
+    section = ctx = None
+    years: List[str] = []
+    unit: Optional[float] = None
+    basis = "Unspecified"
+    rows: Dict[tuple, tuple] = {}          # (key, fy) -> (value_in_file_units, line)
+    borrow: Dict[str, Dict[str, tuple]] = {}   # fy -> {label+ctx: (value, line)}
+
+    def put(key, fy, val, line):
+        rows.setdefault((key, fy), (val, line))
+
+    for raw in lines:
+        line = re.sub(r"\s+", " ", raw).strip()
+        if not line:
+            continue
+        low = line.lower()
+        short = len(line) < 130
+        if short:
+            if "consolidated" in low:
+                basis = "Consolidated"
+            elif "standalone" in low or "stand-alone" in low:
+                basis = "Standalone"
+            if re.search(r"balance sheet", low) and not re.search(r"\bnote|\bnotes", low):
+                section, ctx, years = "BS", None, []
+            elif re.search(r"statement of profit|profit and loss|income statement|statement of income", low) and not re.search(r"\bnote", low):
+                section, ctx, years = "PL", None, []
+            elif "cash flow" in low:
+                section = "CF"
+            elif "changes in equity" in low:
+                section = "OTHER"
+            if section == "BS":
+                if re.match(r"^non[- ]current assets", low): ctx = "NCA"
+                elif re.match(r"^current assets", low): ctx = "CA"
+                elif re.match(r"^non[- ]current liabilities", low): ctx = "NCL"
+                elif re.match(r"^current liabilities", low): ctx = "CL"
+                elif re.match(r"^(equity|shareholders|total assets)\b", low) and "liabilities" not in low[:12]: ctx = "EQ"
+                elif re.match(r"^equity and liabilities|^liabilities$", low): ctx = "EQ"
+        u = unit_in(line) if len(line) < 220 else None
+        if u is not None and not re.search(r"\d[\d,]{3,}", line):
+            unit = u
+        ys = years_in(line)
+        if ys and not re.search(r"\d[\d,]{4,}", re.sub(r"20\d\d", "", line)) and (len(ys) >= 2 or len(line) < 70):
+            years = ys
+            continue
+        if section not in ("BS", "PL") or not years or unit is None:
+            continue
+        label, nums = _label_nums(line)
+        if not label or not nums:
+            continue
+        lab = _ENUM.sub("", label).strip().lower()
+        lab = re.sub(r"\s*\(refer.*$|\s*\(note.*$", "", lab).strip()
+        if len(nums) == len(years) + 1 and abs(nums[0]) < 100 and float(nums[0]).is_integer():
+            nums = nums[1:]
+        n = min(len(nums), len(years))
+        if n == 0:
+            continue
+        cols = list(zip(years[:n], nums[:n]))
+        for fy, v in cols:
+            if section == "BS":
+                if re.match(r"^(equity )?share capital\b", lab) and ctx in ("EQ", None):
+                    put("share_capital", fy, v, line)
+                elif re.match(r"^other equity\b|^reserves (and|&) surplus\b", lab):
+                    put("other_equity", fy, v, line)
+                elif re.match(r"^equity attributable to", lab):
+                    put("eq_attr", fy, v, line)
+                elif re.match(r"^total equity\b", lab) and "liabilities" not in lab:
+                    put("total_equity", fy, v, line)
+                elif re.match(r"^total borrowings\b", lab):
+                    put("total_borrowings", fy, v, line)
+                elif _BORROW.match(lab) and "lease" not in lab and ctx not in ("NCA", "CA"):
+                    borrow.setdefault(fy, {}).setdefault(f"{lab}|{ctx}", (v, line))
+                elif re.match(r"^(non[- ]current )?investments?$", lab) and ctx in ("NCA", None):
+                    put("inv_nc", fy, v, line)
+                elif re.match(r"^current investments?$", lab) or (lab == "investments" and ctx == "CA"):
+                    put("inv_c", fy, v, line)
+                elif re.match(r"^cash and cash equivalents\b|^cash and bank balances\b", lab) and ctx in ("CA", None):
+                    put("cash", fy, v, line)
+            else:  # P&L
+                if re.match(r"^revenue from operations\b", lab):
+                    put("revenue", fy, v, line)
+                elif re.match(r"^total revenue\b|^net sales\b", lab):
+                    put("revenue2", fy, v, line)
+                elif re.match(r"^(net )?profit\s*(/\s*\(loss\)\s*|\(loss\)\s*)?(for the (year|period)|after tax)\b", lab) and "before" not in lab:
+                    put("pat", fy, v, line)
+
+    out: List[Cand] = []
+    if unit is None:
+        return out
+    fys = sorted({fy for (_, fy) in rows} | set(borrow))
+    pl = page_label
+
+    def emit(field, fy, val, rank, ev):
+        out.append(Cand(field, fy, round(val * unit, 2), source, url, basis, rank, f"{pl}{ev}"[:260], "statement"))
+
+    for fy in fys:
+        g = lambda k: rows.get((k, fy))
+        if g("share_capital") and g("other_equity"):
+            emit("net_worth", fy, g("share_capital")[0] + g("other_equity")[0], 0,
+                 f"Share capital + Other equity: [{g('share_capital')[1]}] + [{g('other_equity')[1]}]")
+        elif g("eq_attr"):
+            emit("net_worth", fy, g("eq_attr")[0], 1, g("eq_attr")[1])
+        elif g("total_equity"):
+            emit("net_worth", fy, g("total_equity")[0], 2, g("total_equity")[1])
+        if g("total_borrowings"):
+            emit("debt", fy, g("total_borrowings")[0], 0, g("total_borrowings")[1])
+        elif borrow.get(fy):
+            parts = borrow[fy].values()
+            emit("debt", fy, sum(v for v, _ in parts), 1, f"Sum of {len(borrow[fy])} borrowing lines: " + " + ".join(f"[{l}]" for _, l in parts))
+        for key, fld in (("inv_nc", "non_current_investments"), ("inv_c", "current_investments"), ("cash", "cash")):
+            if g(key):
+                emit(fld, fy, g(key)[0], 0, g(key)[1])
+        if g("revenue"):
+            emit("revenue", fy, g("revenue")[0], 0, g("revenue")[1])
+        elif g("revenue2"):
+            emit("revenue", fy, g("revenue2")[0], 1, g("revenue2")[1])
+        if g("pat"):
+            emit("pat", fy, g("pat")[0], 0, g("pat")[1])
+    return out
+
+
 def parse_lines(lines: List[str], source: str, url: str, page_label: str = "") -> List[Cand]:
     out: List[Cand] = []
     cur_years: List[str] = []
@@ -143,7 +289,7 @@ def parse_lines(lines: List[str], source: str, url: str, page_label: str = "") -
                     cols = cols[:1] if cur_years[0] >= cur_years[-1] else cols[-1:]
                 for fy, v in cols:
                     out.append(Cand(fld, fy, round(v * cur_unit, 2), source, url, basis, rank,
-                                    f"{page_label}{line[:200]}"))
+                                    f"{page_label}{line[:200]}", "loose"))
                 break
     return out
 
@@ -160,7 +306,8 @@ def html_lines(html: str) -> List[str]:
 
 
 def from_html(html: str, source: str, url: str) -> List[Cand]:
-    return parse_lines(html_lines(html), source, url)
+    lines = html_lines(html)
+    return parse_statements(lines, source, url) + parse_lines(lines, source, url)
 
 
 _PAGE_CUES = re.compile(r"balance sheet|statement of profit|profit and loss|financial highlights|key financial|five[- ]year|ten[- ]year|"
@@ -201,7 +348,9 @@ def from_pdf(url: str, source: str = "Annual report PDF", max_pages: int = 450, 
         if not _PAGE_CUES.search(text):
             continue
         scanned += 1
-        cands += parse_lines(text.splitlines(), source, f"{url}#page={pno}", page_label=f"p.{pno}: ")
+        lines = text.splitlines()
+        cands += parse_statements(lines, source, f"{url}#page={pno}", page_label=f"p.{pno}: ")
+        cands += parse_lines(lines, source, f"{url}#page={pno}", page_label=f"p.{pno}: ")
     log(f"PDF  {url}: {len(reader.pages)} pages, {scanned} financial pages scanned, {len(cands)} candidate numbers")
     return cands
 

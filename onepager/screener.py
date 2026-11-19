@@ -23,6 +23,8 @@ class ScreenerData:
     investments: Optional[tuple] = None
     rating_links: List[str] = field(default_factory=list)
     annual_reports: List[str] = field(default_factory=list)
+    cash: Optional[tuple] = None
+    warehouse_id: Optional[str] = None
     name: Optional[str] = None
     about: Optional[str] = None
     website: Optional[str] = None
@@ -76,6 +78,9 @@ def parse(html: str, url: str = "") -> ScreenerData:
     if common:
         y = common[-1]
         s.net_worth = (y, round(eq[y] + res[y], 2))
+    ci = soup.find(id="company-info")
+    if ci:
+        s.warehouse_id = ci.get("data-warehouse-id") or ci.get("data-company-id")
     h1 = soup.find("h1")
     s.name = h1.get_text(strip=True) if h1 else None
     ab = soup.select_one(".company-profile .about, .about")
@@ -109,7 +114,31 @@ def fetch(symbol: str) -> Optional[ScreenerData]:
     html = get(url)
     if not html or not re.search(r'id="profit-loss"', html):
         return None
-    return parse(html, url)
+    sc = parse(html, url)
+    if sc.warehouse_id:
+        sc.cash = _cash(sc.warehouse_id)
+    return sc
+
+
+def _cash(wid: str) -> Optional[tuple]:
+    """Screener's expandable 'Other Assets' schedule has a 'Cash Equivalents' row (consolidated)."""
+    import json
+    raw = get(f"https://www.screener.in/api/company/{wid}/schedules/?parent=Other+Assets&section=balance-sheet&consolidated=",
+              accept_json=True)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        return None
+    row = next((v for k, v in data.items() if "cash" in k.lower()), None)
+    if not isinstance(row, dict):
+        return None
+    vals = {}
+    for k, v in row.items():
+        m = re.search(r"(\d{4})", k)
+        f = _f(str(v))
+        if m and f is not None:
+            vals[f"FY{m.group(1)}"] = f
+    return (max(vals), vals[max(vals)]) if vals else None
 
 
 def search(name: str) -> Optional[tuple]:
